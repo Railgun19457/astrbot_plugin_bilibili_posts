@@ -106,9 +106,21 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 - `aiohttp`：`bilibili-api-python` 相关异步网络依赖；
 - `Pillow`：渲染动态概览图。
 
+## 字体说明
+
+插件渲染概览图时会优先使用系统字体：
+
+- Windows：微软雅黑、黑体、宋体；
+- Linux：文泉驿微米黑；
+- Emoji：优先使用系统自带 emoji 字体。
+
+如果系统中没有可用中文字体，插件会自动下载一份轻量中文字体 `LXGWWenKaiLite-Regular.ttf` 到插件缓存目录 `cache/fonts/`。字体文件小于 10MB，只用于动态概览图文字渲染。
+
+Emoji 字体不会自动下载；找不到系统 emoji 字体时会自动降级为普通字体或忽略无法渲染的字符。
+
 ## 注意事项
 
 - 建议将 `check_interval_minutes` 设置为 `30` 分钟或更高，避免频繁请求触发 B站风控。
 - `session_umos` 必须填写有效目标会话，否则模板会被跳过。
 - B站接口可能随时变化，若出现长期抓取失败，请先检查依赖版本和插件日志。
-- Windows 环境下会优先使用微软雅黑等系统字体；Linux 环境建议安装可显示中文和 emoji 的字体，以获得更好的概览图效果。
+- Linux 环境仍建议安装 `fonts-wqy-microhei` 和 emoji 字体，以获得更好的概览图效果。

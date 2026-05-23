@@ -25,6 +25,14 @@ BACKGROUND_BOTTOM = (244, 248, 255)
 CARD_BG = (255, 255, 255)
 BORDER = (232, 236, 245)
 VIDEO_CARD_BG = (247, 249, 253)
+FONT_CACHE_DIR_NAME = "fonts"
+FONT_DOWNLOAD_TIMEOUT = 30
+FONT_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
+CHINESE_FONT_FILENAME = "LXGWWenKaiLite-Regular.ttf"
+CHINESE_FONT_URLS = [
+    "https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.520/LXGWWenKaiLite-Regular.ttf",
+    "https://gh.llkk.cc/https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.520/LXGWWenKaiLite-Regular.ttf",
+]
 EMOJI_FONT_CANDIDATES = [
     "C:/Windows/Fonts/seguiemj.ttf",
     "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
@@ -35,14 +43,17 @@ class DynamicRenderer:
     def __init__(self, temp_dir: Path, cache_dir: Path, *, timeout: int = 20) -> None:
         self.temp_dir = temp_dir
         self.cache_dir = cache_dir
+        self.font_dir = self.cache_dir / FONT_CACHE_DIR_NAME
         self.timeout = timeout
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.font_regular = _load_font(28)
-        self.font_medium = _load_font(32)
-        self.font_large = _load_font(44)
-        self.font_small = _load_font(22)
-        self.font_tiny = _load_font(18)
+        self.font_dir.mkdir(parents=True, exist_ok=True)
+        font_path = _resolve_chinese_font(self.font_dir)
+        self.font_regular = _load_font(28, font_path)
+        self.font_medium = _load_font(32, font_path)
+        self.font_large = _load_font(44, font_path)
+        self.font_small = _load_font(22, font_path)
+        self.font_tiny = _load_font(18, font_path)
         self.font_emoji_regular = _load_emoji_font(28)
         self.font_emoji_medium = _load_emoji_font(32)
         self.font_emoji_small = _load_emoji_font(22)
@@ -491,27 +502,73 @@ class DynamicRenderer:
         draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline)
 
 
-def _download_sync(url: str, timeout: int) -> bytes:
+def _download_sync(url: str, timeout: int, *, max_bytes: int | None = None) -> bytes:
     import urllib.request
 
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
-        return response.read()
+        data = response.read(max_bytes + 1 if max_bytes else -1)
+    if max_bytes is not None and len(data) > max_bytes:
+        raise ValueError(f"下载内容超过限制：{max_bytes} bytes")
+    return data
 
 
-def _load_font(size: int) -> ImageFont.ImageFont:
+def _resolve_chinese_font(font_dir: Path) -> Path | None:
     candidates = [
         "C:/Windows/Fonts/msyh.ttc",
         "C:/Windows/Fonts/simhei.ttf",
         "C:/Windows/Fonts/simsun.ttc",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
     ]
     for path in candidates:
+        font_path = Path(path)
+        if _is_valid_font(font_path):
+            return font_path
+
+    downloaded_font = font_dir / CHINESE_FONT_FILENAME
+    if _is_valid_font(downloaded_font):
+        return downloaded_font
+
+    for url in CHINESE_FONT_URLS:
         try:
-            if Path(path).exists():
-                return ImageFont.truetype(path, size=size)
-        except OSError:
+            logger.info("[BilibiliPosts] 未找到可用中文字体，尝试下载：%s", url)
+            data = _download_sync(
+                url,
+                FONT_DOWNLOAD_TIMEOUT,
+                max_bytes=FONT_DOWNLOAD_MAX_BYTES,
+            )
+            temp_path = downloaded_font.with_suffix(downloaded_font.suffix + ".tmp")
+            temp_path.write_bytes(data)
+            if not _is_valid_font(temp_path):
+                temp_path.unlink(missing_ok=True)
+                raise ValueError("下载文件不是有效字体")
+            temp_path.replace(downloaded_font)
+            logger.info("[BilibiliPosts] 中文字体已缓存：%s", downloaded_font)
+            return downloaded_font
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[BilibiliPosts] 下载中文字体失败：%s", exc)
             continue
+
+    logger.warning("[BilibiliPosts] 未找到可用中文字体，将使用 Pillow 默认字体。")
+    return None
+
+
+def _is_valid_font(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+    try:
+        ImageFont.truetype(str(path), size=16)
+    except OSError:
+        return False
+    return True
+
+
+def _load_font(size: int, font_path: Path | None) -> ImageFont.ImageFont:
+    if font_path is not None:
+        try:
+            return ImageFont.truetype(str(font_path), size=size)
+        except OSError:
+            logger.warning("[BilibiliPosts] 加载字体失败：%s", font_path)
     return ImageFont.load_default()
 
 
