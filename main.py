@@ -287,7 +287,7 @@ class BilibiliPostsPlugin(Star):
         pushed = 0
         for dynamic in push_items:
             if await self._push_dynamic(template, dynamic):
-                self.state.mark_seen(state_key, dynamic.id, dynamic.publish_time)
+                self.state.mark_seen(state_key, dynamic.id)
                 pushed += 1
 
         if pushed > 0 and filtered:
@@ -323,7 +323,7 @@ class BilibiliPostsPlugin(Star):
                 skipped += 1
                 continue
             if await self._push_dynamic(template, dynamic):
-                self.state.mark_seen(state_key, dynamic.id, dynamic.publish_time)
+                self.state.mark_seen(state_key, dynamic.id)
                 pushed += 1
 
         return {

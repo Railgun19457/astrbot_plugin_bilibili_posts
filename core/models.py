@@ -57,11 +57,6 @@ FORWARD_OPTION_ALIASES: dict[str, ForwardOption] = {
 @dataclass(frozen=True)
 class MonitorUser:
     uid: int
-    display_name: str = ""
-
-    @property
-    def label(self) -> str:
-        return self.display_name or str(self.uid)
 
 
 @dataclass(frozen=True)
@@ -95,13 +90,10 @@ class DynamicAuthor:
     uid: int | None = None
     name: str = ""
     face: str = ""
-    pub_ts: int | None = None
 
 
 @dataclass(frozen=True)
 class DynamicVideo:
-    aid: str = ""
-    bvid: str = ""
     title: str = ""
     desc: str = ""
     url: str = ""
@@ -120,7 +112,6 @@ class DynamicStats:
 class DynamicItem:
     id: str
     kind: DynamicKind
-    raw_type: str = ""
     text: str = ""
     author: DynamicAuthor = field(default_factory=DynamicAuthor)
     images: tuple[str, ...] = ()

@@ -16,8 +16,6 @@ from .models import (
     PluginConfig,
 )
 
-TEMPLATE_KEY_FIELD = "__template_key"
-
 DEFAULT_DYNAMIC_KINDS = frozenset(
     {
         DynamicKind.VIDEO,
@@ -99,9 +97,8 @@ def _parse_users(value: Any) -> Iterable[MonitorUser]:
     for item in _as_list(value):
         if isinstance(item, Mapping):
             uid_text = _as_str(item.get("uid"))
-            name = _as_str(item.get("name") or item.get("display_name"))
         else:
-            uid_text, name = _split_user_entry(_as_str(item))
+            uid_text = _as_str(item)
 
         match = re.search(r"\d+", uid_text)
         if not match:
@@ -117,15 +114,7 @@ def _parse_users(value: Any) -> Iterable[MonitorUser]:
         if uid <= 0:
             logger.warning("[BilibiliPosts] UID 必须大于 0：%s", item)
             continue
-        yield MonitorUser(uid=uid, display_name=name)
-
-
-def _split_user_entry(value: str) -> tuple[str, str]:
-    for sep in (":", "：", "|", ","):
-        if sep in value:
-            left, right = value.split(sep, 1)
-            return left.strip(), right.strip()
-    return value.strip(), ""
+        yield MonitorUser(uid=uid)
 
 
 def _parse_dynamic_kinds(value: Any) -> frozenset[DynamicKind]:

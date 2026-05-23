@@ -14,7 +14,6 @@ MAX_SEEN_IDS_PER_KEY = 500
 class StateEntry:
     seen_ids: list[str] = field(default_factory=list)
     initialized: bool = False
-    latest_publish_time: int | None = None
 
 
 class DynamicStateStore:
@@ -44,11 +43,9 @@ class DynamicStateStore:
             if not isinstance(value, dict):
                 continue
             seen_ids = [str(item) for item in value.get("seen_ids", []) if item]
-            latest = value.get("latest_publish_time")
             self._entries[str(key)] = StateEntry(
                 seen_ids=seen_ids[-MAX_SEEN_IDS_PER_KEY:],
                 initialized=bool(value.get("initialized", False)),
-                latest_publish_time=latest if isinstance(latest, int) else None,
             )
 
     def save(self) -> None:
@@ -59,7 +56,6 @@ class DynamicStateStore:
                 key: {
                     "seen_ids": entry.seen_ids[-MAX_SEEN_IDS_PER_KEY:],
                     "initialized": entry.initialized,
-                    "latest_publish_time": entry.latest_publish_time,
                 }
                 for key, entry in self._entries.items()
             },
@@ -80,38 +76,18 @@ class DynamicStateStore:
     def has_seen(self, key: str, dynamic_id: str) -> bool:
         return dynamic_id in self._get_entry(key).seen_ids
 
-    def mark_seen(
-        self, key: str, dynamic_id: str, publish_time: int | None = None
-    ) -> None:
+    def mark_seen(self, key: str, dynamic_id: str) -> None:
         entry = self._get_entry(key)
         if dynamic_id in entry.seen_ids:
             entry.seen_ids.remove(dynamic_id)
         entry.seen_ids.append(dynamic_id)
         entry.seen_ids = entry.seen_ids[-MAX_SEEN_IDS_PER_KEY:]
         entry.initialized = True
-        if publish_time is not None:
-            if (
-                entry.latest_publish_time is None
-                or publish_time > entry.latest_publish_time
-            ):
-                entry.latest_publish_time = publish_time
 
     def mark_many_seen(self, key: str, dynamic_ids: list[str]) -> None:
         for dynamic_id in dynamic_ids:
             self.mark_seen(key, dynamic_id)
         self.mark_initialized(key)
-
-    def reset(self, target: str | None = None) -> int:
-        if not target or target.lower() == "all":
-            count = len(self._entries)
-            self._entries = {}
-            return count
-        removed = 0
-        for key in list(self._entries.keys()):
-            if target in key:
-                self._entries.pop(key, None)
-                removed += 1
-        return removed
 
     def count_entries(self) -> int:
         return len(self._entries)

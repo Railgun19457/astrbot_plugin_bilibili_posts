@@ -57,7 +57,7 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 | --- | --- | --- |
 | `name` | `默认动态模板` | 模板名称，用于日志和状态区分 |
 | `enabled` | `true` | 是否启用当前模板 |
-| `users` | `[]` | 要检测的 B站 UID 列表，支持 `123456` 或 `123456:备注名` 格式 |
+| `users` | `[]` | 要检测的 B站 UID 列表，可填写纯 UID，也可填写包含 UID 的字符串 |
 | `dynamic_types` | 视频投稿、图文/图片、纯文字、转发 | 要推送的动态类型 |
 | `forward_options` | 渲染图、原始链接 | 推送内容选项 |
 | `session_umos` | `[]` | 目标会话 UMO 列表，可在目标会话发送 `/sid` 获取 |
@@ -85,39 +85,12 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 
 同时启用两个选项时，每条动态会先发送概览图，再发送链接文本。
 
-## 配置示例
-
-```yaml
-enable_auto_check: true
-check_interval_minutes: 30
-request_timeout_seconds: 20
-page_limit: 1
-default_command_dynamic_count: 3
-templates:
-  - name: 默认动态模板
-    enabled: true
-    users:
-      - "123456:关注的UP主"
-      - "987654"
-    dynamic_types:
-      - 视频投稿
-      - 图文/图片
-      - 纯文字
-      - 转发
-    forward_options:
-      - 渲染图
-      - 原始链接
-    session_umos:
-      - "aiocqhttp:GroupMessage:123456789"
-```
-
 ## 持久化说明
 
 插件会在数据目录下维护 `state.json`，用于保存：
 
 - 每个模板和 UID 组合的初始化状态；
 - 已推送或已建立基线的动态 ID；
-- 最近一次记录到的动态发布时间。
 
 这意味着：
 
@@ -139,4 +112,3 @@ templates:
 - `session_umos` 必须填写有效目标会话，否则模板会被跳过。
 - B站接口可能随时变化，若出现长期抓取失败，请先检查依赖版本和插件日志。
 - Windows 环境下会优先使用微软雅黑等系统字体；Linux 环境建议安装可显示中文和 emoji 的字体，以获得更好的概览图效果。
-- `data/` 目录是运行时数据目录，不应提交到仓库。

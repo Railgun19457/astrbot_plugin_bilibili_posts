@@ -75,8 +75,6 @@ def parse_dynamic_item(item: dict[str, Any], *, depth: int = 0) -> DynamicItem |
     if major_type == "MAJOR_TYPE_ARCHIVE":
         archive = major.get("archive") or {}
         video = DynamicVideo(
-            aid=str(archive.get("aid") or ""),
-            bvid=str(archive.get("bvid") or ""),
             title=str(archive.get("title") or ""),
             desc=str(
                 archive.get("desc")
@@ -101,9 +99,8 @@ def parse_dynamic_item(item: dict[str, Any], *, depth: int = 0) -> DynamicItem |
         uid=_safe_int(author_raw.get("mid")),
         name=str(author_raw.get("name") or ""),
         face=normalize_url(author_raw.get("face")),
-        pub_ts=_safe_int(author_raw.get("pub_ts")),
     )
-    publish_time = author.pub_ts or _safe_int(item.get("pub_ts"))
+    publish_time = _safe_int(author_raw.get("pub_ts")) or _safe_int(item.get("pub_ts"))
 
     if not url and dynamic_id:
         url = f"https://t.bilibili.com/{dynamic_id}"
@@ -114,7 +111,6 @@ def parse_dynamic_item(item: dict[str, Any], *, depth: int = 0) -> DynamicItem |
     return DynamicItem(
         id=dynamic_id,
         kind=kind,
-        raw_type=raw_type,
         text=text or "",
         author=author,
         images=tuple(img for img in images if img),
