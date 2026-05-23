@@ -1,0 +1,129 @@
+{
+	"enable_auto_check": {
+		"description": "启用自动检测",
+		"hint": "开启后 AstrBot 启动/插件加载后会按检测频率定时查询 B站动态并推送新动态。",
+		"type": "bool",
+		"default": true
+	},
+	"check_interval_minutes": {
+		"description": "检测频率（分钟）",
+		"hint": "每隔多少分钟查询一次动态。建议不要过低，避免触发 B站风控。",
+		"type": "int",
+		"slider": {
+			"min": 1,
+			"max": 1440,
+			"step": 1
+		},
+		"default": 30
+	},
+	"request_timeout_seconds": {
+		"description": "请求超时（秒）",
+		"hint": "获取动态和下载渲染素材时的网络超时时间。",
+		"type": "int",
+		"slider": {
+			"min": 5,
+			"max": 120,
+			"step": 5
+		},
+		"default": 20
+	},
+	"page_limit": {
+		"description": "每次最多分页数",
+		"hint": "每轮每个 UID 最多抓取多少页新版动态。页数越大越容易触发风控。",
+		"type": "int",
+		"slider": {
+			"min": 1,
+			"max": 5,
+			"step": 1
+		},
+		"default": 1
+	},
+	"default_command_dynamic_count": {
+		"description": "指令默认动态数量",
+		"hint": "执行 /哔哩动态 且未指定数量时，每个 UID 默认推送最新多少条动态。",
+		"type": "int",
+		"slider": {
+			"min": 1,
+			"max": 20,
+			"step": 1
+		},
+		"default": 3
+	},
+	"templates": {
+		"description": "动态检测模板列表",
+		"hint": "每个模板定义要检测的用户、动态种类、转发处理策略和目标会话。UMO 可在目标会话发送 /sid 获取。",
+		"type": "template_list",
+		"default": [],
+		"templates": {
+			"dynamic_monitor": {
+				"name": "动态检测模板",
+				"hint": "检测一组 B站 UID，并将新动态推送到一个或多个会话。",
+				"display_item": "name",
+				"hide_hint_in_list": true,
+				"items": {
+					"name": {
+						"description": "模板名称",
+						"hint": "用于日志和状态区分。",
+						"type": "string",
+						"default": "默认动态模板"
+					},
+					"enabled": {
+						"description": "启用模板",
+						"hint": "关闭后该模板不会被检测。",
+						"type": "bool",
+						"default": true
+					},
+					"users": {
+						"description": "要检测的用户 UID 列表",
+						"hint": "填写 B站 UID。可使用 123456 或 123456:备注名 格式。",
+						"type": "list",
+						"items": {
+							"type": "string"
+						},
+						"default": []
+					},
+					"dynamic_types": {
+						"description": "要检测的动态种类",
+						"hint": "仅推送选中的动态类型。",
+						"type": "list",
+						"options": [
+							"视频投稿",
+							"图文/图片",
+							"纯文字",
+							"转发",
+							"其他"
+						],
+						"default": [
+							"视频投稿",
+							"图文/图片",
+							"纯文字",
+							"转发"
+						]
+					},
+					"forward_options": {
+						"description": "推送内容选项",
+						"hint": "控制推送时是否包含 Pillow 概览图和动态原始链接。",
+						"type": "list",
+						"options": [
+							"渲染图",
+							"原始链接"
+						],
+						"default": [
+							"渲染图",
+							"原始链接"
+						]
+					},
+					"session_umos": {
+						"description": "目标会话 UMO 列表",
+						"hint": "要推送到的会话 Unified Message Origin 列表，例如 aiocqhttp:GroupMessage:123456。可在目标会话发送 /sid 获取。",
+						"type": "list",
+						"items": {
+							"type": "string"
+						},
+						"default": []
+					}
+				}
+			}
+		}
+	}
+}

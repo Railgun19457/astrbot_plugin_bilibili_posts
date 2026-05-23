@@ -1,0 +1,8 @@
+name: astrbot_plugin_bilibili_posts
+display_name: B站动态检测
+desc: 定时检测指定 B站用户动态，并将新动态以 Pillow 概览图推送到指定会话。
+short_desc: B站动态检测与推送
+version: v0.1.0
+author: Railgun19457
+repo: https://github.com/Railgun19457/astrbot_plugin_bilibili_posts
+astrbot_version: ">=4.10.4"
