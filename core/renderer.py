@@ -28,10 +28,10 @@ VIDEO_CARD_BG = (247, 249, 253)
 FONT_CACHE_DIR_NAME = "fonts"
 FONT_DOWNLOAD_TIMEOUT = 30
 FONT_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
-CHINESE_FONT_FILENAME = "LXGWWenKaiLite-Regular.ttf"
+CHINESE_FONT_FILENAME = "wqy-microhei.ttc"
 CHINESE_FONT_URLS = [
-    "https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.520/LXGWWenKaiLite-Regular.ttf",
-    "https://gh.llkk.cc/https://github.com/lxgw/LxgwWenKai-Lite/releases/download/v1.520/LXGWWenKaiLite-Regular.ttf",
+    "https://raw.githubusercontent.com/anthonyfok/fonts-wqy-microhei/master/wqy-microhei.ttc",
+    "https://github.com/anthonyfok/fonts-wqy-microhei/raw/master/wqy-microhei.ttc",
 ]
 EMOJI_FONT_CANDIDATES = [
     "C:/Windows/Fonts/seguiemj.ttf",
