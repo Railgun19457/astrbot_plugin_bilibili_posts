@@ -514,24 +514,13 @@ def _download_sync(url: str, timeout: int, *, max_bytes: int | None = None) -> b
 
 
 def _resolve_chinese_font(font_dir: Path) -> Path | None:
-    candidates = [
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/simsun.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-    ]
-    for path in candidates:
-        font_path = Path(path)
-        if _is_valid_font(font_path):
-            return font_path
-
     downloaded_font = font_dir / CHINESE_FONT_FILENAME
     if _is_valid_font(downloaded_font):
         return downloaded_font
 
     for url in CHINESE_FONT_URLS:
         try:
-            logger.info("[BilibiliPosts] 未找到可用中文字体，尝试下载：%s", url)
+            logger.info("[BilibiliPosts] 尝试下载中文字体：%s", url)
             data = _download_sync(
                 url,
                 FONT_DOWNLOAD_TIMEOUT,
@@ -549,7 +538,7 @@ def _resolve_chinese_font(font_dir: Path) -> Path | None:
             logger.warning("[BilibiliPosts] 下载中文字体失败：%s", exc)
             continue
 
-    logger.warning("[BilibiliPosts] 未找到可用中文字体，将使用 Pillow 默认字体。")
+    logger.warning("[BilibiliPosts] 中文字体下载失败，将使用 Pillow 默认字体。")
     return None
 
 
