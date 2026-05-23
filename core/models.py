@@ -2,8 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
-from typing import Any
 
 
 class DynamicKind(StrEnum):
@@ -131,17 +129,9 @@ class DynamicItem:
     publish_time: int | None = None
     orig: DynamicItem | None = None
     stats: DynamicStats = field(default_factory=DynamicStats)
-    raw: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     @property
     def title(self) -> str:
         if self.video and self.video.title:
             return self.video.title
         return self.text.splitlines()[0][:80] if self.text else "新动态"
-
-
-@dataclass(frozen=True)
-class RenderResult:
-    image_path: Path | None
-    text: str
-    link: str

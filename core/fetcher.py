@@ -6,6 +6,7 @@ from typing import Any
 
 from astrbot.api import logger
 
+from .models import DynamicItem
 from .parser import parse_dynamic_item
 
 
@@ -91,9 +92,9 @@ class BilibiliFetcher:
 
         return last_data or {}
 
-    async def fetch_and_parse(self, uid: int):
+    async def fetch_and_parse(self, uid: int) -> list[DynamicItem]:
         raw_items = await self.fetch_user_dynamics(uid)
-        parsed = []
+        parsed: list[DynamicItem] = []
         for raw in raw_items:
             item = parse_dynamic_item(raw)
             if item is None:

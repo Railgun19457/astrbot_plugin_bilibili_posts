@@ -354,10 +354,13 @@ class DynamicRenderer:
             )
 
     def _stats_items(self, dynamic: DynamicItem) -> list[tuple[str, str]]:
+        stats = dynamic.stats
+        if stats.like is None and stats.comment is None and stats.forward is None:
+            return []
         return [
-            ("👍", _format_count(dynamic.stats.like)),
-            ("💬", _format_count(dynamic.stats.comment)),
-            ("↗", _format_count(dynamic.stats.forward)),
+            ("👍", _format_count(stats.like)),
+            ("💬", _format_count(stats.comment)),
+            ("↗", _format_count(stats.forward)),
         ]
 
     def _draw_stats(

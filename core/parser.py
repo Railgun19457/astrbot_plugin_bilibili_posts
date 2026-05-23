@@ -123,7 +123,6 @@ def parse_dynamic_item(item: dict[str, Any], *, depth: int = 0) -> DynamicItem |
         publish_time=publish_time,
         orig=orig,
         stats=_parse_stats(stat_raw),
-        raw=item,
     )
 
 

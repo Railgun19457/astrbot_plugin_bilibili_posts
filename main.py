@@ -11,9 +11,10 @@ from astrbot.api.star import Context, Star
 from astrbot.core.star.star_tools import StarTools
 
 from .core.config import load_plugin_config
-from .core.fetcher import BilibiliFetchError, BilibiliFetcher
+from .core.fetcher import BilibiliFetcher
 from .core.models import (
     DYNAMIC_KIND_LABELS,
+    DynamicItem,
     ForwardOption,
     MonitorTemplate,
     MonitorUser,
@@ -53,9 +54,7 @@ class BilibiliPostsPlugin(Star):
         """查看 B站动态检测插件状态。"""
 
         self._reload_config()
-        enabled_templates = [
-            template for template in self.config.templates if template.enabled
-        ]
+        enabled_templates = self._enabled_templates()
         uid_count = sum(len(template.users) for template in enabled_templates)
         next_check = self._format_next_check()
         lines = [
@@ -178,9 +177,7 @@ class BilibiliPostsPlugin(Star):
         self._reload_config()
         await self.renderer.cleanup_temp()
 
-        enabled_templates = [
-            template for template in self.config.templates if template.enabled
-        ]
+        enabled_templates = self._enabled_templates()
         if not enabled_templates:
             message = "未配置有效动态检测模板，已跳过检测。"
             self._last_summary = message
@@ -212,11 +209,7 @@ class BilibiliPostsPlugin(Star):
                 skipped += result["skipped"]
                 await asyncio.sleep(1)
 
-        try:
-            self.state.save()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[BilibiliPosts] 保存状态失败：%s", exc)
-            errors.append(f"保存状态失败：{exc}")
+        self._save_state(errors)
 
         summary = (
             f"检测完成：抓取 {fetched} 条，推送 {pushed} 条，"
@@ -229,9 +222,7 @@ class BilibiliPostsPlugin(Star):
     async def _push_latest_dynamics(self, count: int) -> str:
         await self.renderer.cleanup_temp()
 
-        enabled_templates = [
-            template for template in self.config.templates if template.enabled
-        ]
+        enabled_templates = self._enabled_templates()
         if not enabled_templates:
             message = "未配置有效动态检测模板，已跳过推送。"
             self._last_summary = message
@@ -265,11 +256,7 @@ class BilibiliPostsPlugin(Star):
                 skipped += result["skipped"]
                 await asyncio.sleep(1)
 
-        try:
-            self.state.save()
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[BilibiliPosts] 保存状态失败：%s", exc)
-            errors.append(f"保存状态失败：{exc}")
+        self._save_state(errors)
 
         summary = (
             f"动态推送完成：每个 UID 请求最新 {count} 条，抓取 {fetched} 条，"
@@ -289,14 +276,9 @@ class BilibiliPostsPlugin(Star):
         count: int,
     ) -> dict[str, int]:
         state_key = self._state_key(template, user.uid)
-        try:
-            dynamics = await fetcher.fetch_and_parse(user.uid)
-        except BilibiliFetchError:
-            raise
+        dynamics = await fetcher.fetch_and_parse(user.uid)
 
-        filtered = [
-            dynamic for dynamic in dynamics if dynamic.kind in template.dynamic_kinds
-        ]
+        filtered = self._filter_dynamics(dynamics, template)
         latest = sorted(
             filtered, key=lambda item: item.publish_time or 0, reverse=True
         )[:count]
@@ -326,14 +308,9 @@ class BilibiliPostsPlugin(Star):
         user: MonitorUser,
     ) -> dict[str, int]:
         state_key = self._state_key(template, user.uid)
-        try:
-            dynamics = await fetcher.fetch_and_parse(user.uid)
-        except BilibiliFetchError:
-            raise
+        dynamics = await fetcher.fetch_and_parse(user.uid)
 
-        filtered = [
-            dynamic for dynamic in dynamics if dynamic.kind in template.dynamic_kinds
-        ]
+        filtered = self._filter_dynamics(dynamics, template)
         filtered.sort(key=lambda item: item.publish_time or 0)
 
         if not self.state.is_initialized(state_key):
@@ -359,7 +336,7 @@ class BilibiliPostsPlugin(Star):
     async def _handle_first_run(
         self,
         state_key: str,
-        filtered,
+        filtered: list[DynamicItem],
         template: MonitorTemplate,
     ) -> dict[str, int]:
         self.state.mark_many_seen(state_key, [dynamic.id for dynamic in filtered])
@@ -376,20 +353,30 @@ class BilibiliPostsPlugin(Star):
             "skipped": 0,
         }
 
-    async def _push_dynamic(self, template: MonitorTemplate, dynamic) -> bool:
+    async def _push_dynamic(
+        self, template: MonitorTemplate, dynamic: DynamicItem
+    ) -> bool:
         chains = await self._build_message_chains(template, dynamic)
-        sent = 0
+        sent_targets = 0
         for umo in template.session_umos:
-            for chain in chains:
-                try:
-                    if await self.context.send_message(umo, chain):
-                        sent += 1
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("[BilibiliPosts] 发送到 UMO %s 失败：%s", umo, exc)
-        return sent > 0
+            if await self._send_message_chains(umo, chains):
+                sent_targets += 1
+        return sent_targets > 0
+
+    async def _send_message_chains(self, umo: str, chains: list[MessageChain]) -> bool:
+        if not chains:
+            return False
+        for chain in chains:
+            try:
+                if not await self.context.send_message(umo, chain):
+                    return False
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("[BilibiliPosts] 发送到 UMO %s 失败：%s", umo, exc)
+                return False
+        return True
 
     async def _build_message_chains(
-        self, template: MonitorTemplate, dynamic
+        self, template: MonitorTemplate, dynamic: DynamicItem
     ) -> list[MessageChain]:
         chains: list[MessageChain] = []
         image_path: Path | None = None
@@ -411,7 +398,11 @@ class BilibiliPostsPlugin(Star):
         return chains
 
     def _format_text_message(
-        self, template: MonitorTemplate, dynamic, *, include_summary: bool = False
+        self,
+        template: MonitorTemplate,
+        dynamic: DynamicItem,
+        *,
+        include_summary: bool = False,
     ) -> str:
         parts: list[str] = []
         if include_summary:
@@ -436,6 +427,24 @@ class BilibiliPostsPlugin(Star):
     def _reload_config(self) -> None:
         self.config = load_plugin_config(self.raw_config)
         self.renderer.timeout = self.config.request_timeout_seconds
+
+    def _enabled_templates(self) -> list[MonitorTemplate]:
+        return [template for template in self.config.templates if template.enabled]
+
+    def _save_state(self, errors: list[str]) -> None:
+        try:
+            self.state.save()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[BilibiliPosts] 保存状态失败：%s", exc)
+            errors.append(f"保存状态失败：{exc}")
+
+    @staticmethod
+    def _filter_dynamics(
+        dynamics: list[DynamicItem], template: MonitorTemplate
+    ) -> list[DynamicItem]:
+        return [
+            dynamic for dynamic in dynamics if dynamic.kind in template.dynamic_kinds
+        ]
 
     @staticmethod
     def _state_key(template: MonitorTemplate, uid: int) -> str:
