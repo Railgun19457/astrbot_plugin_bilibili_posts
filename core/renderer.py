@@ -25,17 +25,21 @@ BACKGROUND_BOTTOM = (244, 248, 255)
 CARD_BG = (255, 255, 255)
 BORDER = (232, 236, 245)
 VIDEO_CARD_BG = (247, 249, 253)
+MEDIA_CACHE_DIR_NAME = "media"
 FONT_CACHE_DIR_NAME = "fonts"
+EMOJI_CACHE_DIR_NAME = "emoji"
 FONT_DOWNLOAD_TIMEOUT = 30
 FONT_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
+EMOJI_DOWNLOAD_TIMEOUT = 15
+EMOJI_DOWNLOAD_MAX_BYTES = 512 * 1024
 CHINESE_FONT_FILENAME = "wqy-microhei.ttc"
 CHINESE_FONT_URLS = [
     "https://raw.githubusercontent.com/anthonyfok/fonts-wqy-microhei/master/wqy-microhei.ttc",
     "https://github.com/anthonyfok/fonts-wqy-microhei/raw/master/wqy-microhei.ttc",
 ]
-EMOJI_FONT_CANDIDATES = [
-    "C:/Windows/Fonts/seguiemj.ttf",
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
+TWEMOJI_BASE_URLS = [
+    "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72",
+    "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/72x72",
 ]
 
 
@@ -43,32 +47,39 @@ class DynamicRenderer:
     def __init__(self, temp_dir: Path, cache_dir: Path, *, timeout: int = 20) -> None:
         self.temp_dir = temp_dir
         self.cache_dir = cache_dir
+        self.media_dir = self.temp_dir / MEDIA_CACHE_DIR_NAME
         self.font_dir = self.cache_dir / FONT_CACHE_DIR_NAME
+        self.emoji_dir = self.cache_dir / EMOJI_CACHE_DIR_NAME
         self.timeout = timeout
         self.temp_dir.mkdir(parents=True, exist_ok=True)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.media_dir.mkdir(parents=True, exist_ok=True)
         self.font_dir.mkdir(parents=True, exist_ok=True)
+        self.emoji_dir.mkdir(parents=True, exist_ok=True)
         font_path = _resolve_chinese_font(self.font_dir)
         self.font_regular = _load_font(28, font_path)
         self.font_medium = _load_font(32, font_path)
         self.font_large = _load_font(44, font_path)
         self.font_small = _load_font(22, font_path)
         self.font_tiny = _load_font(18, font_path)
-        self.font_emoji_regular = _load_emoji_font(28)
-        self.font_emoji_medium = _load_emoji_font(32)
-        self.font_emoji_small = _load_emoji_font(22)
 
     async def render(self, dynamic: DynamicItem, template: MonitorTemplate) -> Path:
         return await asyncio.to_thread(self._render_sync, dynamic, template)
 
     async def cleanup_temp(self, *, older_than_seconds: int = 86400) -> None:
         cutoff = time.time() - older_than_seconds
-        for path in self.temp_dir.glob("*.png"):
+        for path in self.temp_dir.glob("bilibili_*.png"):
             try:
                 if path.stat().st_mtime < cutoff:
                     path.unlink(missing_ok=True)
             except OSError:
                 logger.debug("[BilibiliPosts] 清理临时图片失败：%s", path)
+        for path in self.media_dir.glob("*.img"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                logger.debug("[BilibiliPosts] 清理临时素材缓存失败：%s", path)
 
     def _render_sync(self, dynamic: DynamicItem, template: MonitorTemplate) -> Path:
         blocks = self._build_blocks(dynamic, template)
@@ -117,7 +128,7 @@ class DynamicRenderer:
                 {
                     "height": max(58, len(text_lines) * 38 + 12),
                     "draw": lambda draw, image, y: self._draw_text_lines(
-                        draw, y, text_lines
+                        image, draw, y, text_lines
                     ),
                 }
             )
@@ -131,7 +142,7 @@ class DynamicRenderer:
                 {
                     "height": 156,
                     "draw": lambda draw, image, y: self._draw_forward_card(
-                        draw, y, dynamic.orig
+                        image, draw, y, dynamic.orig
                     ),
                 }
             )
@@ -141,7 +152,9 @@ class DynamicRenderer:
             blocks.append(
                 {
                     "height": 44,
-                    "draw": lambda draw, image, y: self._draw_stats(draw, y, stats),
+                    "draw": lambda draw, image, y: self._draw_stats(
+                        image, draw, y, stats
+                    ),
                 }
             )
 
@@ -174,23 +187,23 @@ class DynamicRenderer:
         image.paste(avatar, (PADDING, y + 6), avatar if avatar.mode == "RGBA" else None)
         name = dynamic.author.name or "Bilibili 用户"
         self._draw_text(
+            image,
             draw,
             (PADDING + 96, y + 6),
             name,
             self.font_medium,
             TEXT_PRIMARY,
-            emoji_font=self.font_emoji_medium,
         )
         uid_text = (
             f"UID {dynamic.author.uid}" if dynamic.author.uid else "Bilibili Dynamic"
         )
         self._draw_text(
+            image,
             draw,
             (PADDING + 96, y + 48),
             uid_text,
             self.font_small,
             TEXT_SECONDARY,
-            emoji_font=self.font_emoji_small,
         )
         publish = _format_time(dynamic.publish_time)
         publish_width = _text_width(draw, publish, self.font_small)
@@ -205,18 +218,18 @@ class DynamicRenderer:
         )
 
     def _draw_text_lines(
-        self, draw: ImageDraw.ImageDraw, y: int, lines: list[str]
+        self, image: Image.Image, draw: ImageDraw.ImageDraw, y: int, lines: list[str]
     ) -> None:
         if not lines:
             lines = ["发布了一条新动态。"]
         for index, line in enumerate(lines):
             self._draw_text(
+                image,
                 draw,
                 (PADDING, y + 8 + index * 38),
                 line,
                 self.font_regular,
                 TEXT_PRIMARY,
-                emoji_font=self.font_emoji_regular,
             )
 
     def _media_block(self, dynamic: DynamicItem) -> dict | None:
@@ -281,12 +294,12 @@ class DynamicRenderer:
         title_y = text_y + 8
         for index, line in enumerate(title_lines):
             self._draw_text(
+                image,
                 draw,
                 (text_x, title_y + index * 38),
                 line or "新视频",
                 self.font_medium,
                 TEXT_PRIMARY,
-                emoji_font=self.font_emoji_medium,
             )
 
         info_y = title_y + max(1, len(title_lines)) * 38 + 18
@@ -315,12 +328,12 @@ class DynamicRenderer:
             )
             for index, line in enumerate(desc_lines):
                 self._draw_text(
+                    image,
                     draw,
                     (x1 + 22, desc_y + 28 + index * 30),
                     line,
                     self.font_small,
                     TEXT_SECONDARY,
-                    emoji_font=self.font_emoji_small,
                 )
 
     def _draw_images(self, image: Image.Image, y: int, urls: Iterable[str]) -> None:
@@ -335,7 +348,7 @@ class DynamicRenderer:
             image.paste(thumb, (x, item_y), thumb if thumb.mode == "RGBA" else None)
 
     def _draw_forward_card(
-        self, draw: ImageDraw.ImageDraw, y: int, orig: DynamicItem
+        self, image: Image.Image, draw: ImageDraw.ImageDraw, y: int, orig: DynamicItem
     ) -> None:
         x1 = PADDING
         x2 = CANVAS_WIDTH - PADDING
@@ -345,23 +358,23 @@ class DynamicRenderer:
         draw.text((x1 + 24, y + 18), "转发原动态", font=self.font_small, fill=BILI_PINK)
         author = orig.author.name or "原作者"
         self._draw_text(
+            image,
             draw,
             (x1 + 24, y + 52),
             f"@{author}",
             self.font_small,
             TEXT_SECONDARY,
-            emoji_font=self.font_emoji_small,
         )
         summary = orig.title or orig.text or "原动态内容"
         lines = self._wrap_text(summary, self.font_small, 46, max_lines=2)
         for index, line in enumerate(lines):
             self._draw_text(
+                image,
                 draw,
                 (x1 + 24, y + 84 + index * 28),
                 line,
                 self.font_small,
                 TEXT_PRIMARY,
-                emoji_font=self.font_emoji_small,
             )
 
     def _stats_items(self, dynamic: DynamicItem) -> list[tuple[str, str]]:
@@ -375,7 +388,11 @@ class DynamicRenderer:
         ]
 
     def _draw_stats(
-        self, draw: ImageDraw.ImageDraw, y: int, items: list[tuple[str, str]]
+        self,
+        image: Image.Image,
+        draw: ImageDraw.ImageDraw,
+        y: int,
+        items: list[tuple[str, str]],
     ) -> None:
         x = PADDING
         for icon, value in items:
@@ -387,15 +404,20 @@ class DynamicRenderer:
                 (247, 249, 253),
                 outline=BORDER,
             )
-            self._draw_text(
+            icon_width = self._draw_text(
+                image,
                 draw,
                 (x + 16, y + 7),
                 icon,
                 self.font_small,
                 TEXT_MUTED,
-                emoji_font=self.font_emoji_small,
             )
-            draw.text((x + 46, y + 7), value, font=self.font_small, fill=TEXT_SECONDARY)
+            draw.text(
+                (x + 16 + icon_width + 8, y + 7),
+                value,
+                font=self.font_small,
+                fill=TEXT_SECONDARY,
+            )
             x += box_width + 14
 
     def _draw_footer(
@@ -420,7 +442,7 @@ class DynamicRenderer:
     ) -> Image.Image:
         if not url:
             return _placeholder(size, rounded=rounded)
-        cache_path = self.cache_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.img"
+        cache_path = self.media_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.img"
         if not cache_path.exists():
             try:
                 data = _download_sync(url, self.timeout)
@@ -441,6 +463,60 @@ class DynamicRenderer:
             logger.debug("[BilibiliPosts] 缓存图片读取失败 %s: %s", cache_path, exc)
             return _placeholder(size, rounded=rounded)
 
+    def _load_twemoji(self, emoji: str, size: int) -> Image.Image | None:
+        codepoint = _twemoji_codepoint(emoji)
+        if not codepoint:
+            return None
+        cache_path = self.emoji_dir / f"{codepoint}.png"
+        if not cache_path.exists() and not self._download_twemoji(
+            codepoint, cache_path
+        ):
+            return None
+
+        try:
+            with Image.open(cache_path) as img:
+                return img.convert("RGBA").resize(
+                    (size, size), Image.Resampling.LANCZOS
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[BilibiliPosts] Emoji 缓存读取失败 %s: %s", cache_path, exc)
+            cache_path.unlink(missing_ok=True)
+            if not self._download_twemoji(codepoint, cache_path):
+                return None
+            try:
+                with Image.open(cache_path) as img:
+                    return img.convert("RGBA").resize(
+                        (size, size), Image.Resampling.LANCZOS
+                    )
+            except Exception as retry_exc:  # noqa: BLE001
+                logger.debug(
+                    "[BilibiliPosts] Emoji 缓存重试读取失败 %s: %s",
+                    cache_path,
+                    retry_exc,
+                )
+                return None
+
+    def _download_twemoji(self, codepoint: str, cache_path: Path) -> bool:
+        temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
+        for base_url in TWEMOJI_BASE_URLS:
+            url = f"{base_url}/{codepoint}.png"
+            try:
+                data = _download_sync(
+                    url,
+                    EMOJI_DOWNLOAD_TIMEOUT,
+                    max_bytes=EMOJI_DOWNLOAD_MAX_BYTES,
+                )
+                temp_path.write_bytes(data)
+                with Image.open(temp_path) as img:
+                    img.verify()
+                temp_path.replace(cache_path)
+                logger.debug("[BilibiliPosts] Emoji 已缓存：%s", cache_path)
+                return True
+            except Exception as exc:  # noqa: BLE001
+                temp_path.unlink(missing_ok=True)
+                logger.debug("[BilibiliPosts] 下载 Twemoji 失败 %s: %s", url, exc)
+        return False
+
     def _wrap_text(
         self, text: str, font: ImageFont.ImageFont, width_chars: int, *, max_lines: int
     ) -> list[str]:
@@ -455,21 +531,32 @@ class DynamicRenderer:
             lines[-1] = lines[-1].rstrip("。,.，") + "…"
         return lines
 
-    @staticmethod
     def _draw_text(
+        self,
+        image: Image.Image,
         draw: ImageDraw.ImageDraw,
         xy: tuple[int, int],
         text: str,
         font: ImageFont.ImageFont,
         fill: tuple[int, int, int],
-        *,
-        emoji_font: ImageFont.ImageFont | None = None,
-    ) -> None:
+    ) -> int:
         if not text:
-            return
+            return 0
         x, y = xy
-        for segment, is_emoji in _split_emoji_runs(text):
-            active_font = emoji_font if is_emoji and emoji_font else font
+        start_x = x
+        for segment, is_emoji in _split_text_tokens(text):
+            if is_emoji:
+                emoji_size = _emoji_size(font)
+                emoji_image = self._load_twemoji(segment, emoji_size)
+                if emoji_image:
+                    image.paste(
+                        emoji_image,
+                        (int(x), int(y + _emoji_y_offset(font, emoji_size))),
+                        emoji_image,
+                    )
+                    x += emoji_image.width + 2
+                    continue
+            active_font = font
             try:
                 draw.text((x, y), segment, font=active_font, fill=fill)
             except (UnicodeEncodeError, OSError):
@@ -478,6 +565,7 @@ class DynamicRenderer:
                 segment = fallback
                 active_font = font
             x += _text_width(draw, segment, active_font)
+        return int(x - start_x)
 
     @staticmethod
     def _draw_gradient(image: Image.Image) -> None:
@@ -561,16 +649,6 @@ def _load_font(size: int, font_path: Path | None) -> ImageFont.ImageFont:
     return ImageFont.load_default()
 
 
-def _load_emoji_font(size: int) -> ImageFont.ImageFont | None:
-    for path in EMOJI_FONT_CANDIDATES:
-        try:
-            if Path(path).exists():
-                return ImageFont.truetype(path, size=size)
-        except OSError:
-            continue
-    return None
-
-
 def _placeholder(size: tuple[int, int], *, rounded: int | None = None) -> Image.Image:
     img = Image.new("RGBA", size, (238, 242, 248, 255))
     draw = ImageDraw.Draw(img)
@@ -625,30 +703,127 @@ def _normalize_text(text: str) -> str:
     return "".join((text or "").split()).strip()
 
 
-def _split_emoji_runs(text: str) -> list[tuple[str, bool]]:
+def _split_text_tokens(text: str) -> list[tuple[str, bool]]:
     if not text:
         return []
-    runs: list[tuple[str, bool]] = []
+    tokens: list[tuple[str, bool]] = []
     buffer: list[str] = []
-    current_is_emoji: bool | None = None
-    for char in text:
-        is_emoji = _is_emoji_char(char)
-        if current_is_emoji is None:
-            current_is_emoji = is_emoji
-        if is_emoji != current_is_emoji:
-            runs.append(("".join(buffer), bool(current_is_emoji)))
-            buffer = []
-            current_is_emoji = is_emoji
-        buffer.append(char)
+    chars = list(text)
+    index = 0
+    while index < len(chars):
+        emoji, next_index = _consume_emoji(chars, index)
+        if emoji:
+            if buffer:
+                tokens.append(("".join(buffer), False))
+                buffer = []
+            tokens.append((emoji, True))
+            index = next_index
+            continue
+        buffer.append(chars[index])
+        index += 1
     if buffer:
-        runs.append(("".join(buffer), bool(current_is_emoji)))
-    return runs
+        tokens.append(("".join(buffer), False))
+    return tokens
 
 
-def _is_emoji_char(char: str) -> bool:
+def _consume_emoji(chars: list[str], index: int) -> tuple[str, int]:
+    char = chars[index]
+    if index + 1 < len(chars) and _is_regional_indicator(char):
+        next_char = chars[index + 1]
+        if _is_regional_indicator(next_char):
+            return char + next_char, index + 2
+
+    if _is_keycap_base(char):
+        next_index = index + 1
+        if next_index < len(chars) and ord(chars[next_index]) == 0xFE0F:
+            next_index += 1
+        if next_index < len(chars) and ord(chars[next_index]) == 0x20E3:
+            return "".join(chars[index : next_index + 1]), next_index + 1
+        return "", index
+
+    if not _is_emoji_base(char):
+        return "", index
+
+    end = _consume_single_emoji(chars, index)
+    while end < len(chars) and ord(chars[end]) == 0x200D:
+        next_end = _consume_single_emoji(chars, end + 1)
+        if next_end == end + 1:
+            break
+        end = next_end
+    return "".join(chars[index:end]), end
+
+
+def _consume_single_emoji(chars: list[str], index: int) -> int:
+    if index >= len(chars) or not _is_emoji_base(chars[index]):
+        return index
+    index += 1
+    if index < len(chars) and ord(chars[index]) == 0xFE0F:
+        index += 1
+    if index < len(chars) and _is_skin_tone(chars[index]):
+        index += 1
+    return index
+
+
+def _twemoji_codepoint(emoji: str) -> str:
+    codepoints = [ord(char) for char in emoji]
+    normalized: list[int] = []
+    for index, codepoint in enumerate(codepoints):
+        if codepoint == 0xFE0F and _should_drop_variation_selector(codepoints, index):
+            continue
+        normalized.append(codepoint)
+    return "-".join(f"{codepoint:x}" for codepoint in normalized)
+
+
+def _should_drop_variation_selector(codepoints: list[int], index: int) -> bool:
+    prev_codepoint = codepoints[index - 1] if index > 0 else None
+    next_codepoint = codepoints[index + 1] if index + 1 < len(codepoints) else None
+    return (
+        prev_codepoint in {0x0023, 0x002A}
+        or _is_digit_codepoint(prev_codepoint)
+        or next_codepoint != 0x200D
+    )
+
+
+def _emoji_size(font: ImageFont.ImageFont) -> int:
+    try:
+        box = font.getbbox("国")
+    except AttributeError:
+        return 24
+    return max(18, box[3] - box[1] + 4)
+
+
+def _emoji_y_offset(font: ImageFont.ImageFont, emoji_size: int) -> int:
+    try:
+        box = font.getbbox("国")
+    except AttributeError:
+        return 0
+    text_height = box[3] - box[1]
+    return max(0, (text_height - emoji_size) // 2 + 2)
+
+
+def _is_emoji_base(char: str) -> bool:
     code = ord(char)
     return (
         0x1F000 <= code <= 0x1FAFF
         or 0x2600 <= code <= 0x27BF
-        or code in {0x200D, 0xFE0F}
+        or _is_regional_indicator(char)
     )
+
+
+def _is_regional_indicator(char: str) -> bool:
+    code = ord(char)
+    return 0x1F1E6 <= code <= 0x1F1FF
+
+
+def _is_keycap_base(char: str) -> bool:
+    code = ord(char)
+    return code in {0x0023, 0x002A} or _is_digit_codepoint(code)
+
+
+def _is_digit_codepoint(codepoint: int | None) -> bool:
+    return codepoint is not None and 0x0030 <= codepoint <= 0x0039
+
+
+def _is_skin_tone(char: str) -> bool:
+    code = ord(char)
+    return 0x1F3FB <= code <= 0x1F3FF

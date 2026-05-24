@@ -8,6 +8,7 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageChain, filter
 from astrbot.api.message_components import Image, Plain
 from astrbot.api.star import Context, Star
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from astrbot.core.star.star_tools import StarTools
 
 from .core.config import load_plugin_config
@@ -34,7 +35,7 @@ class BilibiliPostsPlugin(Star):
         self.raw_config = config or {}
         self.config = load_plugin_config(self.raw_config)
         self.data_dir = StarTools.get_data_dir(PLUGIN_NAME)
-        self.temp_dir = self.data_dir / "temp"
+        self.temp_dir = Path(get_astrbot_temp_path()) / PLUGIN_NAME
         self.cache_dir = self.data_dir / "cache"
         self.state = DynamicStateStore(self.data_dir / "state.json")
         self.renderer = DynamicRenderer(
