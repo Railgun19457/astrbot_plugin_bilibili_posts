@@ -2,7 +2,7 @@
 
 ![:name](https://count.getloli.com/@astrbot_plugin_bilibili_posts?name=astrbot_plugin_bilibili_posts&theme=miku&padding=7&offset=0&align=top&scale=1&pixelated=1&darkmode=auto)
 
-AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow 概览图和原始链接推送到指定会话。
+AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Typst 概览图和原始链接推送到指定会话。
 
 ## 功能概览
 
@@ -12,7 +12,7 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 | 手动推送 | 通过 `/哔哩动态 [数量]` 推送每个 UID 的最新 N 条动态 |
 | 多模板 | 支持多个检测模板，每个模板可独立配置 UID、动态类型和目标会话 |
 | 类型过滤 | 支持视频投稿、图文/图片、纯文字、转发和其他动态类型 |
-| 图片概览 | 使用 Pillow 渲染动态概览图，展示作者、正文、图片/视频卡片、互动统计等信息 |
+| 图片概览 | 使用 Typst 渲染动态概览图，展示作者、正文、图片/视频卡片、互动统计等信息 |
 | 原始链接 | 可附带动态原始链接，转发动态也可附带原动态链接 |
 | 状态去重 | 记录已推送动态 ID，避免自动检测重复推送 |
 | 首次基线 | 新模板首次运行只建立基线，不会一次性推送历史动态 |
@@ -80,7 +80,7 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 
 | 配置值 | 说明 |
 | --- | --- |
-| `渲染图` / `render_image` / `概览图` | 生成并发送 Pillow 动态概览图 |
+| `渲染图` / `render_image` / `概览图` | 生成并发送 Typst 动态概览图 |
 | `原始链接` / `original_link` | 发送动态原始链接；转发动态会额外发送原动态链接 |
 
 同时启用两个选项时，每条动态会先发送概览图，再发送链接文本。
@@ -102,7 +102,8 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 
 - 中文字体缓存到插件数据目录的 `cache/fonts/`，会长期复用。
 - Emoji 图片缓存到插件数据目录的 `cache/emoji/`，遇到新 emoji 时才会按需下载并长期复用。
-- 动态封面、头像、正文图片和渲染输出图等临时素材放在 AstrBot 框架自带的 `data/temp/astrbot_plugin_bilibili_posts/`，会按过期时间清理。
+- 动态封面、头像、正文图片缓存到插件数据目录的 `cache/media/`（Typst 以此为 root 读取），会按过期时间清理。
+- 渲染输出的 PNG 放在 AstrBot 框架自带的 `data/temp/astrbot_plugin_bilibili_posts/`，同样会按过期时间清理。
 
 ## 依赖
 
@@ -110,15 +111,17 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Pillow
 
 - `bilibili-api-python`：获取 B站动态数据；
 - `aiohttp`：`bilibili-api-python` 相关异步网络依赖；
-- `Pillow`：渲染动态概览图。
+- `typst`：基于 Typst 排版引擎渲染动态概览图（自带原生编译器，无需安装外部 `typst` 命令，也不再依赖 Pillow）。
 
 ## 字体说明
 
 插件渲染概览图时不会依赖系统中文字体，而是统一使用自动下载的轻量中文字体 `wqy-microhei.ttc`。
 
-字体会缓存到插件缓存目录 `cache/fonts/`，文件约 5.2MB，只用于动态概览图文字渲染。缓存存在且可用时不会重复下载；下载失败时才会降级到 Pillow 默认字体。
+字体会缓存到插件缓存目录 `cache/fonts/`，文件约 5.2MB，只用于动态概览图文字渲染。缓存存在且可用时不会重复下载；下载失败时回退到系统 CJK 字体（如微软雅黑、Noto Sans CJK、PingFang）。
 
 Emoji 不再依赖系统 emoji 字体。插件会使用 Twemoji PNG 图片按需渲染，单个 emoji 图片限制为 512KB，并缓存到 `cache/emoji/` 供后续动态复用。若单个 emoji 下载失败，会自动降级为普通文字渲染或忽略无法渲染的字符。
+
+模板文件为 `core/card.typ`，媒体素材以相对路径挂载在插件数据目录下（Typst 的 root），输出 PNG 仍写入 `data/temp/astrbot_plugin_bilibili_posts/`。渲染在后台线程中串行执行，不会阻塞事件循环。
 
 ## 注意事项
 

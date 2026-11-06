@@ -2,36 +2,52 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import textwrap
+import json
+import threading
 import time
-from collections.abc import Iterable
+import unicodedata
+import urllib.request
 from pathlib import Path
 
+import typst
+
 from astrbot.api import logger
-from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .models import DynamicItem, MonitorTemplate
 
 CANVAS_WIDTH = 960
-PADDING = 42
-BLOCK_GAP = 22
-CARD_RADIUS = 28
-BILI_PINK = (251, 114, 153)
-TEXT_PRIMARY = (35, 38, 47)
-TEXT_SECONDARY = (98, 104, 118)
-TEXT_MUTED = (148, 154, 168)
-BACKGROUND_TOP = (255, 246, 250)
-BACKGROUND_BOTTOM = (244, 248, 255)
-CARD_BG = (255, 255, 255)
-BORDER = (232, 236, 245)
-VIDEO_CARD_BG = (247, 249, 253)
+PPI = 72.0
+PAGE_MARGIN = 24
+CARD_PADDING = 30
+CONTENT_WIDTH = CANVAS_WIDTH - (PAGE_MARGIN + CARD_PADDING) * 2
+
+BODY_SIZE = 29
+BODY_MAX_LINES = 8
+BODY_MAX_LINES_WITH_VIDEO = 5
+VIDEO_TITLE_SIZE = 32
+VIDEO_TITLE_MAX_LINES = 2
+VIDEO_CARD_PADDING = 22
+VIDEO_COVER_WIDTH = 336
+VIDEO_GAP = 24
+VIDEO_TEXT_WIDTH = (
+    CONTENT_WIDTH - VIDEO_CARD_PADDING * 2 - VIDEO_COVER_WIDTH - VIDEO_GAP
+)
+VIDEO_DESC_WIDTH = CONTENT_WIDTH - VIDEO_CARD_PADDING * 2
+SECONDARY_SIZE = 22
+VIDEO_DESC_MAX_LINES = 4
+FORWARD_CARD_PADDING = 24
+FORWARD_WIDTH = CONTENT_WIDTH - FORWARD_CARD_PADDING * 2
+FORWARD_SUMMARY_MAX_LINES = 2
+
 MEDIA_CACHE_DIR_NAME = "media"
 FONT_CACHE_DIR_NAME = "fonts"
 EMOJI_CACHE_DIR_NAME = "emoji"
 FONT_DOWNLOAD_TIMEOUT = 30
 FONT_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
-EMOJI_DOWNLOAD_TIMEOUT = 15
+EMOJI_DOWNLOAD_TIMEOUT = 10
 EMOJI_DOWNLOAD_MAX_BYTES = 512 * 1024
+NEGATIVE_CACHE_TTL = 3600
+CLAMP_SAFETY_FACTOR = 0.95
 CHINESE_FONT_FILENAME = "wqy-microhei.ttc"
 CHINESE_FONT_URLS = [
     "https://raw.githubusercontent.com/anthonyfok/fonts-wqy-microhei/master/wqy-microhei.ttc",
@@ -41,462 +57,289 @@ TWEMOJI_BASE_URLS = [
     "https://cdn.jsdelivr.net/gh/twitter/twemoji@14.0.2/assets/72x72",
     "https://raw.githubusercontent.com/twitter/twemoji/v14.0.2/assets/72x72",
 ]
+FONT_MAGIC = (b"ttcf", b"\x00\x01\x00\x00", b"OTTO", b"true", b"typ1")
+IMAGE_EXTENSIONS = (".png", ".jpg", ".gif", ".webp", ".svg")
 
 
 class DynamicRenderer:
+    """Render Bilibili dynamic cards with Typst.
+
+    Attributes:
+        temp_dir: Directory that receives the rendered PNG files.
+        cache_dir: Plugin cache directory; it is also the Typst root so every
+            image referenced by the template can use a relative path.
+        timeout: Network timeout in seconds for media downloads.
+    """
+
     def __init__(self, temp_dir: Path, cache_dir: Path, *, timeout: int = 20) -> None:
+        """Initialize the renderer and prepare cache directories.
+
+        Args:
+            temp_dir: Directory that receives rendered PNG files.
+            cache_dir: Plugin cache directory, used as the Typst root.
+            timeout: Network timeout in seconds for media downloads.
+        """
         self.temp_dir = temp_dir
         self.cache_dir = cache_dir
-        self.media_dir = self.temp_dir / MEDIA_CACHE_DIR_NAME
+        self.media_dir = self.cache_dir / MEDIA_CACHE_DIR_NAME
         self.font_dir = self.cache_dir / FONT_CACHE_DIR_NAME
         self.emoji_dir = self.cache_dir / EMOJI_CACHE_DIR_NAME
         self.timeout = timeout
-        self.temp_dir.mkdir(parents=True, exist_ok=True)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self.media_dir.mkdir(parents=True, exist_ok=True)
-        self.font_dir.mkdir(parents=True, exist_ok=True)
-        self.emoji_dir.mkdir(parents=True, exist_ok=True)
-        font_path = _resolve_chinese_font(self.font_dir)
-        self.font_regular = _load_font(28, font_path)
-        self.font_medium = _load_font(32, font_path)
-        self.font_large = _load_font(44, font_path)
-        self.font_small = _load_font(22, font_path)
-        self.font_tiny = _load_font(18, font_path)
+        self.root = self.cache_dir.parent
+        self.template = (Path(__file__).with_name("card.typ")).read_bytes()
+
+        for directory in (
+            self.temp_dir,
+            self.cache_dir,
+            self.media_dir,
+            self.font_dir,
+            self.emoji_dir,
+        ):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        self.font_path = _resolve_chinese_font(self.font_dir)
+        self._compiler: typst.Compiler | None = None
+        self._lock = threading.Lock()
+        self._failed_media: dict[str, float] = {}
+        self._failed_emoji: dict[str, float] = {}
 
     async def render(self, dynamic: DynamicItem, template: MonitorTemplate) -> Path:
-        return await asyncio.to_thread(self._render_sync, dynamic, template)
+        """Render one dynamic into a PNG file.
+
+        Args:
+            dynamic: The dynamic to render.
+            template: Monitor template that triggered the push. It is accepted for
+                call-site compatibility and does not affect the layout.
+
+        Returns:
+            Path to the rendered PNG file.
+
+        Raises:
+            typst.TypstError: If the Typst template fails to compile.
+        """
+        del template
+        return await asyncio.to_thread(self._render_sync, dynamic)
 
     async def cleanup_temp(self, *, older_than_seconds: int = 86400) -> None:
+        """Remove rendered images and cached media older than the given age.
+
+        Args:
+            older_than_seconds: Age threshold in seconds.
+        """
         cutoff = time.time() - older_than_seconds
-        for path in self.temp_dir.glob("bilibili_*.png"):
-            try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink(missing_ok=True)
-            except OSError:
-                logger.debug("[BilibiliPosts] 清理临时图片失败：%s", path)
-        for path in self.media_dir.glob("*.img"):
-            try:
-                if path.stat().st_mtime < cutoff:
-                    path.unlink(missing_ok=True)
-            except OSError:
-                logger.debug("[BilibiliPosts] 清理临时素材缓存失败：%s", path)
-
-    def _render_sync(self, dynamic: DynamicItem, template: MonitorTemplate) -> Path:
-        blocks = self._build_blocks(dynamic, template)
-        gap_total = BLOCK_GAP * max(0, len(blocks) - 1)
-        height = max(
-            520,
-            PADDING * 2 + sum(block["height"] for block in blocks) + gap_total,
+        patterns = (
+            (self.temp_dir, "bilibili_*.png"),
+            (self.media_dir, "*"),
         )
-        image = Image.new("RGB", (CANVAS_WIDTH, height), BACKGROUND_BOTTOM)
-        draw = ImageDraw.Draw(image)
-        self._draw_gradient(image)
-        self._rounded_rectangle(
-            draw, (24, 24, CANVAS_WIDTH - 24, height - 24), CARD_RADIUS, CARD_BG
-        )
+        for directory, pattern in patterns:
+            for path in directory.glob(pattern):
+                if not path.is_file():
+                    continue
+                try:
+                    if path.stat().st_mtime < cutoff:
+                        path.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("[BilibiliPosts] 清理临时文件失败：%s", path)
 
-        y = PADDING
-        for block in blocks:
-            draw_fn = block["draw"]
-            draw_fn(draw, image, y)
-            y += block["height"] + BLOCK_GAP
+    def _render_sync(self, dynamic: DynamicItem) -> Path:
+        """Build the payload and compile the Typst template into a PNG file.
 
-        output = self.temp_dir / f"bilibili_{dynamic.id}_{int(time.time())}.png"
-        image.save(output, format="PNG", optimize=True)
+        Args:
+            dynamic: The dynamic to render.
+
+        Returns:
+            Path to the rendered PNG file.
+        """
+        payload = self._build_payload(dynamic)
+        stamp = int(time.time())
+        output = self.temp_dir / f"bilibili_{_safe_filename(dynamic.id)}_{stamp}.png"
+        with self._lock:
+            compiler = self._get_compiler()
+            compiler.compile(
+                input=self.template,
+                output=output.as_posix(),
+                format="png",
+                ppi=PPI,
+                sys_inputs={"data": json.dumps(payload, ensure_ascii=False)},
+            )
         return output
 
-    def _build_blocks(
-        self, dynamic: DynamicItem, template: MonitorTemplate
-    ) -> list[dict]:
-        blocks = [
-            {
-                "height": 112,
-                "draw": lambda draw, image, y: self._draw_header(
-                    draw, image, y, dynamic
-                ),
-            },
-        ]
-        post_text = self._post_text(dynamic)
-        if post_text:
-            text_lines = self._wrap_text(
-                post_text,
-                self.font_regular,
-                29,
-                max_lines=5 if dynamic.video else 8,
-            )
-            blocks.append(
-                {
-                    "height": max(58, len(text_lines) * 38 + 12),
-                    "draw": lambda draw, image, y: self._draw_text_lines(
-                        image, draw, y, text_lines
-                    ),
-                }
-            )
+    def _get_compiler(self) -> typst.Compiler:
+        """Return the lazily created Typst compiler.
 
-        media_block = self._media_block(dynamic)
-        if media_block:
-            blocks.append(media_block)
+        Returns:
+            A compiler bound to the plugin cache root with CJK fonts available.
+        """
+        if self._compiler is None:
+            font_paths = [self.font_dir.as_posix()] if self.font_path else []
+            self._compiler = typst.Compiler(root=self.root, font_paths=font_paths)
+        return self._compiler
+
+    def _build_payload(self, dynamic: DynamicItem) -> dict:
+        """Build the Typst template payload for a dynamic.
+
+        Args:
+            dynamic: The dynamic to render.
+
+        Returns:
+            Template data consumed by ``card.typ``.
+        """
+        max_lines = BODY_MAX_LINES_WITH_VIDEO if dynamic.video else BODY_MAX_LINES
+        stats = dynamic.stats
+        has_stats = any(
+            value is not None for value in (stats.like, stats.comment, stats.forward)
+        )
+
+        payload: dict = {
+            "avatar": self._media_path(dynamic.author.face),
+            "author": dynamic.author.name or "Bilibili 用户",
+            "uid": f"UID {dynamic.author.uid}"
+            if dynamic.author.uid
+            else "Bilibili Dynamic",
+            "published": _format_time(dynamic.publish_time),
+            "text": self._rich(
+                _clamp_text(
+                    _post_text(dynamic),
+                    width=CONTENT_WIDTH,
+                    size=BODY_SIZE,
+                    max_lines=max_lines,
+                )
+            ),
+            "video": None,
+            "images": [],
+            "orig": None,
+            "stats": [],
+            "footer_left": "Bilibili 动态检测",
+            "footer_right": _truncate_link(dynamic.url or "https://www.bilibili.com"),
+        }
+
+        if dynamic.video and dynamic.video.cover:
+            payload["video"] = {
+                "cover": self._media_path(dynamic.video.cover),
+                "title": _clamp_text(
+                    dynamic.video.title or dynamic.title,
+                    width=VIDEO_TEXT_WIDTH,
+                    size=VIDEO_TITLE_SIZE,
+                    max_lines=VIDEO_TITLE_MAX_LINES,
+                ),
+                "duration": dynamic.video.duration,
+                "desc": _clamp_text(
+                    dynamic.video.desc,
+                    width=VIDEO_DESC_WIDTH,
+                    size=SECONDARY_SIZE,
+                    max_lines=VIDEO_DESC_MAX_LINES,
+                ),
+            }
+        elif dynamic.images:
+            payload["images"] = [
+                self._media_path(url) for url in list(dynamic.images)[:9]
+            ]
 
         if dynamic.orig:
-            blocks.append(
-                {
-                    "height": 156,
-                    "draw": lambda draw, image, y: self._draw_forward_card(
-                        image, draw, y, dynamic.orig
-                    ),
-                }
-            )
-
-        stats = self._stats_items(dynamic)
-        if stats:
-            blocks.append(
-                {
-                    "height": 44,
-                    "draw": lambda draw, image, y: self._draw_stats(
-                        image, draw, y, stats
-                    ),
-                }
-            )
-
-        blocks.append(
-            {
-                "height": 52,
-                "draw": lambda draw, image, y: self._draw_footer(draw, y, dynamic),
-            }
-        )
-        return blocks
-
-    @staticmethod
-    def _post_text(dynamic: DynamicItem) -> str:
-        text = (dynamic.text or "").strip()
-        if dynamic.video:
-            title = (dynamic.video.title or "").strip()
-            if text and _normalize_text(text) != _normalize_text(title):
-                return text
-            return ""
-        return text or dynamic.title
-
-    def _draw_header(
-        self,
-        draw: ImageDraw.ImageDraw,
-        image: Image.Image,
-        y: int,
-        dynamic: DynamicItem,
-    ) -> None:
-        avatar = self._load_cached_image(dynamic.author.face, size=(76, 76))
-        image.paste(avatar, (PADDING, y + 6), avatar if avatar.mode == "RGBA" else None)
-        name = dynamic.author.name or "Bilibili 用户"
-        self._draw_text(
-            image,
-            draw,
-            (PADDING + 96, y + 6),
-            name,
-            self.font_medium,
-            TEXT_PRIMARY,
-        )
-        uid_text = (
-            f"UID {dynamic.author.uid}" if dynamic.author.uid else "Bilibili Dynamic"
-        )
-        self._draw_text(
-            image,
-            draw,
-            (PADDING + 96, y + 48),
-            uid_text,
-            self.font_small,
-            TEXT_SECONDARY,
-        )
-        publish = _format_time(dynamic.publish_time)
-        publish_width = _text_width(draw, publish, self.font_small)
-        draw.text(
-            (CANVAS_WIDTH - PADDING - publish_width, y + 18),
-            publish,
-            font=self.font_small,
-            fill=TEXT_MUTED,
-        )
-        draw.line(
-            (PADDING, y + 104, CANVAS_WIDTH - PADDING, y + 104), fill=BORDER, width=1
-        )
-
-    def _draw_text_lines(
-        self, image: Image.Image, draw: ImageDraw.ImageDraw, y: int, lines: list[str]
-    ) -> None:
-        if not lines:
-            lines = ["发布了一条新动态。"]
-        for index, line in enumerate(lines):
-            self._draw_text(
-                image,
-                draw,
-                (PADDING, y + 8 + index * 38),
-                line,
-                self.font_regular,
-                TEXT_PRIMARY,
-            )
-
-    def _media_block(self, dynamic: DynamicItem) -> dict | None:
-        if dynamic.video and dynamic.video.cover:
-            title_lines = self._wrap_text(
-                dynamic.video.title or dynamic.title,
-                self.font_medium,
-                19,
-                max_lines=2,
-            )
-            desc_lines = self._wrap_text(
-                dynamic.video.desc, self.font_small, 56, max_lines=4
-            )
-            desc_height = 42 + len(desc_lines) * 30 if desc_lines else 0
-            height = 304 + desc_height
-            return {
-                "height": height,
-                "draw": lambda draw, image, y: self._draw_video_card(
-                    draw, image, y, dynamic, height, title_lines, desc_lines
+            payload["orig"] = {
+                "author": dynamic.orig.author.name or "原作者",
+                "summary": _clamp_text(
+                    dynamic.orig.title or dynamic.orig.text or "原动态内容",
+                    width=FORWARD_WIDTH,
+                    size=SECONDARY_SIZE,
+                    max_lines=FORWARD_SUMMARY_MAX_LINES,
                 ),
             }
-        if dynamic.images:
-            rows = (
-                1 if len(dynamic.images) <= 3 else 2 if len(dynamic.images) <= 6 else 3
-            )
-            return {
-                "height": rows * 176 + (rows - 1) * 12,
-                "draw": lambda draw, image, y: self._draw_images(
-                    image, y, dynamic.images
-                ),
-            }
-        return None
 
-    def _draw_video_card(
-        self,
-        draw: ImageDraw.ImageDraw,
-        image: Image.Image,
-        y: int,
-        dynamic: DynamicItem,
-        height: int,
-        title_lines: list[str],
-        desc_lines: list[str],
-    ) -> None:
-        assert dynamic.video is not None
-        x1 = PADDING
-        x2 = CANVAS_WIDTH - PADDING
-        self._rounded_rectangle(
-            draw, (x1, y, x2, y + height), 24, VIDEO_CARD_BG, outline=BORDER
-        )
+        if has_stats:
+            payload["stats"] = [
+                {"icon": self._rich("👍"), "value": _format_count(stats.like)},
+                {"icon": self._rich("💬"), "value": _format_count(stats.comment)},
+                {"icon": self._rich("↗"), "value": _format_count(stats.forward)},
+            ]
 
-        cover_x = x1 + 22
-        cover_y = y + 22
-        cover_width = 336
-        cover_height = 210
-        cover = self._load_cached_image(
-            dynamic.video.cover, size=(cover_width, cover_height), rounded=18
-        )
-        image.paste(cover, (cover_x, cover_y), cover if cover.mode == "RGBA" else None)
+        return payload
 
-        text_x = cover_x + cover_width + 28
-        text_y = y + 22
-        title_y = text_y + 8
-        for index, line in enumerate(title_lines):
-            self._draw_text(
-                image,
-                draw,
-                (text_x, title_y + index * 38),
-                line or "新视频",
-                self.font_medium,
-                TEXT_PRIMARY,
-            )
+    def _rich(self, text: str) -> list[dict]:
+        """Split text into plain text and twemoji image tokens.
 
-        info_y = title_y + max(1, len(title_lines)) * 38 + 18
-        if dynamic.video.duration:
-            duration_text = f"时长 {dynamic.video.duration}"
-            duration_width = _text_width(draw, duration_text, self.font_small) + 34
-            pill = (text_x, info_y, text_x + duration_width, info_y + 36)
-            self._rounded_rectangle(draw, pill, 18, (255, 255, 255), outline=BORDER)
-            draw.text(
-                (text_x + 17, info_y + 6),
-                duration_text,
-                font=self.font_small,
-                fill=TEXT_SECONDARY,
-            )
+        Args:
+            text: Raw text that may contain emoji.
 
-        if desc_lines:
-            desc_y = cover_y + cover_height + 22
-            draw.line(
-                (x1 + 22, desc_y - 16, x2 - 22, desc_y - 16), fill=BORDER, width=1
-            )
-            draw.text(
-                (x1 + 22, desc_y),
-                "简介",
-                font=self.font_tiny,
-                fill=TEXT_MUTED,
-            )
-            for index, line in enumerate(desc_lines):
-                self._draw_text(
-                    image,
-                    draw,
-                    (x1 + 22, desc_y + 28 + index * 30),
-                    line,
-                    self.font_small,
-                    TEXT_SECONDARY,
-                )
+        Returns:
+            Token list consumed by the ``rich`` helper in ``card.typ``.
+        """
+        tokens: list[dict] = []
+        for segment, is_emoji in _split_text_tokens(text):
+            if is_emoji:
+                path = self._emoji_path(segment)
+                if path:
+                    tokens.append({"emoji": path})
+                    continue
+            tokens.append({"text": segment})
+        return tokens
 
-    def _draw_images(self, image: Image.Image, y: int, urls: Iterable[str]) -> None:
-        urls = list(urls)[:9]
-        size = 168
-        gap = 12
-        for index, url in enumerate(urls):
-            row, col = divmod(index, 3)
-            x = PADDING + col * (size + gap)
-            item_y = y + row * (size + gap)
-            thumb = self._load_cached_image(url, size=(size, size), rounded=16)
-            image.paste(thumb, (x, item_y), thumb if thumb.mode == "RGBA" else None)
+    def _media_path(self, url: str) -> str:
+        """Download and cache an image, then return its Typst-relative path.
 
-    def _draw_forward_card(
-        self, image: Image.Image, draw: ImageDraw.ImageDraw, y: int, orig: DynamicItem
-    ) -> None:
-        x1 = PADDING
-        x2 = CANVAS_WIDTH - PADDING
-        self._rounded_rectangle(
-            draw, (x1, y, x2, y + 144), 22, (247, 249, 253), outline=BORDER
-        )
-        draw.text((x1 + 24, y + 18), "转发原动态", font=self.font_small, fill=BILI_PINK)
-        author = orig.author.name or "原作者"
-        self._draw_text(
-            image,
-            draw,
-            (x1 + 24, y + 52),
-            f"@{author}",
-            self.font_small,
-            TEXT_SECONDARY,
-        )
-        summary = orig.title or orig.text or "原动态内容"
-        lines = self._wrap_text(summary, self.font_small, 46, max_lines=2)
-        for index, line in enumerate(lines):
-            self._draw_text(
-                image,
-                draw,
-                (x1 + 24, y + 84 + index * 28),
-                line,
-                self.font_small,
-                TEXT_PRIMARY,
-            )
+        Args:
+            url: Remote image URL.
 
-    def _stats_items(self, dynamic: DynamicItem) -> list[tuple[str, str]]:
-        stats = dynamic.stats
-        if stats.like is None and stats.comment is None and stats.forward is None:
-            return []
-        return [
-            ("👍", _format_count(stats.like)),
-            ("💬", _format_count(stats.comment)),
-            ("↗", _format_count(stats.forward)),
-        ]
-
-    def _draw_stats(
-        self,
-        image: Image.Image,
-        draw: ImageDraw.ImageDraw,
-        y: int,
-        items: list[tuple[str, str]],
-    ) -> None:
-        x = PADDING
-        for icon, value in items:
-            box_width = max(108, _text_width(draw, value, self.font_small) + 58)
-            self._rounded_rectangle(
-                draw,
-                (x, y, x + box_width, y + 38),
-                19,
-                (247, 249, 253),
-                outline=BORDER,
-            )
-            icon_width = self._draw_text(
-                image,
-                draw,
-                (x + 16, y + 7),
-                icon,
-                self.font_small,
-                TEXT_MUTED,
-            )
-            draw.text(
-                (x + 16 + icon_width + 8, y + 7),
-                value,
-                font=self.font_small,
-                fill=TEXT_SECONDARY,
-            )
-            x += box_width + 14
-
-    def _draw_footer(
-        self, draw: ImageDraw.ImageDraw, y: int, dynamic: DynamicItem
-    ) -> None:
-        draw.line((PADDING, y, CANVAS_WIDTH - PADDING, y), fill=BORDER, width=1)
-        link_text = dynamic.url or "https://www.bilibili.com"
-        draw.text(
-            (PADDING, y + 18), "Bilibili 动态检测", font=self.font_tiny, fill=TEXT_MUTED
-        )
-        right_text = link_text[:52] + ("…" if len(link_text) > 52 else "")
-        right_width = _text_width(draw, right_text, self.font_tiny)
-        draw.text(
-            (CANVAS_WIDTH - PADDING - right_width, y + 18),
-            right_text,
-            font=self.font_tiny,
-            fill=TEXT_MUTED,
-        )
-
-    def _load_cached_image(
-        self, url: str, *, size: tuple[int, int], rounded: int | None = None
-    ) -> Image.Image:
+        Returns:
+            Root-relative POSIX path, or an empty string when unavailable.
+        """
         if not url:
-            return _placeholder(size, rounded=rounded)
-        cache_path = self.media_dir / f"{hashlib.sha256(url.encode()).hexdigest()}.img"
-        if not cache_path.exists():
-            try:
-                data = _download_sync(url, self.timeout)
-                cache_path.write_bytes(data)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("[BilibiliPosts] 图片下载失败 %s: %s", url, exc)
-                return _placeholder(size, rounded=rounded)
-        try:
-            with Image.open(cache_path) as img:
-                img = ImageOps.exif_transpose(img).convert("RGBA")
-                img = ImageOps.fit(img, size, method=Image.Resampling.LANCZOS)
-                if rounded:
-                    img = _round_image(img, rounded)
-                else:
-                    img = _circle_image(img)
-                return img
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[BilibiliPosts] 缓存图片读取失败 %s: %s", cache_path, exc)
-            return _placeholder(size, rounded=rounded)
+            return ""
+        if _recently_failed(self._failed_media, url):
+            return ""
+        key = hashlib.sha256(url.encode()).hexdigest()
+        for extension in IMAGE_EXTENSIONS:
+            cached = self.media_dir / f"{key}{extension}"
+            if cached.exists():
+                return self._relative(cached)
 
-    def _load_twemoji(self, emoji: str, size: int) -> Image.Image | None:
+        try:
+            data = _download_sync(url, self.timeout)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[BilibiliPosts] 图片下载失败 %s: %s", url, exc)
+            self._failed_media[url] = time.monotonic()
+            return ""
+
+        extension = _detect_image_extension(data)
+        if not extension:
+            logger.debug("[BilibiliPosts] 不支持的图片格式：%s", url)
+            self._failed_media[url] = time.monotonic()
+            return ""
+
+        path = self.media_dir / f"{key}{extension}"
+        path.write_bytes(data)
+        return self._relative(path)
+
+    def _emoji_path(self, emoji: str) -> str:
+        """Download and cache the twemoji PNG for an emoji.
+
+        Args:
+            emoji: Emoji character sequence.
+
+        Returns:
+            Root-relative POSIX path, or an empty string when unavailable.
+        """
         codepoint = _twemoji_codepoint(emoji)
         if not codepoint:
-            return None
-        cache_path = self.emoji_dir / f"{codepoint}.png"
-        if not cache_path.exists() and not self._download_twemoji(
-            codepoint, cache_path
-        ):
-            return None
-
-        try:
-            with Image.open(cache_path) as img:
-                return img.convert("RGBA").resize(
-                    (size, size), Image.Resampling.LANCZOS
-                )
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[BilibiliPosts] Emoji 缓存读取失败 %s: %s", cache_path, exc)
-            cache_path.unlink(missing_ok=True)
-            if not self._download_twemoji(codepoint, cache_path):
-                return None
-            try:
-                with Image.open(cache_path) as img:
-                    return img.convert("RGBA").resize(
-                        (size, size), Image.Resampling.LANCZOS
-                    )
-            except Exception as retry_exc:  # noqa: BLE001
-                logger.debug(
-                    "[BilibiliPosts] Emoji 缓存重试读取失败 %s: %s",
-                    cache_path,
-                    retry_exc,
-                )
-                return None
+            return ""
+        if _recently_failed(self._failed_emoji, codepoint):
+            return ""
+        path = self.emoji_dir / f"{codepoint}.png"
+        if not path.exists() and not self._download_twemoji(codepoint, path):
+            self._failed_emoji[codepoint] = time.monotonic()
+            return ""
+        return self._relative(path)
 
     def _download_twemoji(self, codepoint: str, cache_path: Path) -> bool:
+        """Download a twemoji asset into the cache.
+
+        Args:
+            codepoint: Twemoji codepoint file name.
+            cache_path: Destination path.
+
+        Returns:
+            True when the asset is available in the cache.
+        """
         temp_path = cache_path.with_suffix(cache_path.suffix + ".tmp")
         for base_url in TWEMOJI_BASE_URLS:
             url = f"{base_url}/{codepoint}.png"
@@ -506,93 +349,151 @@ class DynamicRenderer:
                     EMOJI_DOWNLOAD_TIMEOUT,
                     max_bytes=EMOJI_DOWNLOAD_MAX_BYTES,
                 )
+                if not _is_png(data):
+                    raise ValueError("下载内容不是 PNG")
                 temp_path.write_bytes(data)
-                with Image.open(temp_path) as img:
-                    img.verify()
                 temp_path.replace(cache_path)
-                logger.debug("[BilibiliPosts] Emoji 已缓存：%s", cache_path)
                 return True
             except Exception as exc:  # noqa: BLE001
                 temp_path.unlink(missing_ok=True)
                 logger.debug("[BilibiliPosts] 下载 Twemoji 失败 %s: %s", url, exc)
         return False
 
-    def _wrap_text(
-        self, text: str, font: ImageFont.ImageFont, width_chars: int, *, max_lines: int
-    ) -> list[str]:
-        normalized = " ".join((text or "").split())
-        if not normalized:
-            return []
-        rough_lines = textwrap.wrap(
-            normalized, width=width_chars, replace_whitespace=False
-        )
-        lines = rough_lines[:max_lines]
-        if len(rough_lines) > max_lines and lines:
-            lines[-1] = lines[-1].rstrip("。,.，") + "…"
-        return lines
+    def _relative(self, path: Path) -> str:
+        """Return a Typst-safe path relative to the plugin cache root.
 
-    def _draw_text(
-        self,
-        image: Image.Image,
-        draw: ImageDraw.ImageDraw,
-        xy: tuple[int, int],
-        text: str,
-        font: ImageFont.ImageFont,
-        fill: tuple[int, int, int],
-    ) -> int:
-        if not text:
-            return 0
-        x, y = xy
-        start_x = x
-        for segment, is_emoji in _split_text_tokens(text):
-            if is_emoji:
-                emoji_size = _emoji_size(font)
-                emoji_image = self._load_twemoji(segment, emoji_size)
-                if emoji_image:
-                    image.paste(
-                        emoji_image,
-                        (int(x), int(y + _emoji_y_offset(font, emoji_size))),
-                        emoji_image,
-                    )
-                    x += emoji_image.width + 2
-                    continue
-            active_font = font
-            try:
-                draw.text((x, y), segment, font=active_font, fill=fill)
-            except (UnicodeEncodeError, OSError):
-                fallback = segment.encode("ascii", "ignore").decode()
-                draw.text((x, y), fallback, font=font, fill=fill)
-                segment = fallback
-                active_font = font
-            x += _text_width(draw, segment, active_font)
-        return int(x - start_x)
+        Args:
+            path: Absolute path inside the Typst root.
 
-    @staticmethod
-    def _draw_gradient(image: Image.Image) -> None:
-        draw = ImageDraw.Draw(image)
-        width, height = image.size
-        for y in range(height):
-            ratio = y / max(1, height - 1)
-            color = tuple(
-                int(BACKGROUND_TOP[i] * (1 - ratio) + BACKGROUND_BOTTOM[i] * ratio)
-                for i in range(3)
-            )
-            draw.line((0, y, width, y), fill=color)
+        Returns:
+            POSIX-style relative path.
+        """
+        try:
+            return path.relative_to(self.root).as_posix()
+        except ValueError:
+            return path.as_posix()
 
-    @staticmethod
-    def _rounded_rectangle(
-        draw: ImageDraw.ImageDraw,
-        box: tuple[int, int, int, int],
-        radius: int,
-        fill: tuple[int, int, int],
-        outline: tuple[int, int, int] | None = None,
-    ) -> None:
-        draw.rounded_rectangle(box, radius=radius, fill=fill, outline=outline)
+
+def _post_text(dynamic: DynamicItem) -> str:
+    """Return the body text to render for a dynamic.
+
+    Args:
+        dynamic: The dynamic to inspect.
+
+    Returns:
+        Post text, or an empty string when the title already covers it.
+    """
+    text = (dynamic.text or "").strip()
+    if dynamic.video:
+        title = (dynamic.video.title or "").strip()
+        if text and _normalize_text(text) != _normalize_text(title):
+            return text
+        return ""
+    return text or dynamic.title
+
+
+def _clamp_text(text: str, *, width: float, size: float, max_lines: int) -> str:
+    """Approximate line wrapping and truncate oversized text with an ellipsis.
+
+    Typst performs the real line breaking; this estimate only decides whether the
+    content must be cut so a single dynamic cannot produce an extremely tall card.
+
+    Args:
+        text: Raw text.
+        width: Available width in points.
+        size: Font size in points.
+        max_lines: Maximum number of lines to keep.
+
+    Returns:
+        Whitespace-normalized text, optionally truncated with an ellipsis.
+    """
+    normalized = " ".join((text or "").split())
+    if not normalized:
+        return ""
+
+    usable_width = width * CLAMP_SAFETY_FACTOR
+    current = 0.0
+    lines = 1
+    char_pos = 0
+    for unit, is_emoji in _iter_text_units(normalized):
+        advance = size if is_emoji else _estimate_advance(unit, size)
+        if current + advance > usable_width:
+            if lines == max_lines:
+                return normalized[:char_pos].rstrip(".,，。;；、 ") + "…"
+            lines += 1
+            current = 0.0
+        current += advance
+        char_pos += len(unit)
+    return normalized
+
+
+def _iter_text_units(text: str) -> list[tuple[str, bool]]:
+    """Flatten text into characters and indivisible emoji sequences.
+
+    Args:
+        text: Source text.
+
+    Returns:
+        List of units paired with an ``is_emoji`` flag.
+    """
+    units: list[tuple[str, bool]] = []
+    for segment, is_emoji in _split_text_tokens(text):
+        if is_emoji:
+            units.append((segment, True))
+        else:
+            units.extend((char, False) for char in segment)
+    return units
+
+
+def _estimate_advance(char: str, size: float) -> float:
+    """Estimate the horizontal advance of a character in points.
+
+    Args:
+        char: Single character.
+        size: Font size in points.
+
+    Returns:
+        Estimated advance width in points.
+    """
+    if char.isspace():
+        return size * 0.3
+    if unicodedata.east_asian_width(char) in ("W", "F"):
+        return size
+    if char in "ilj|!.,:;'`":
+        return size * 0.3
+    if char.isupper() or char.isdigit():
+        return size * 0.62
+    return size * 0.52
+
+
+def _recently_failed(cache: dict[str, float], key: str) -> bool:
+    """Check whether a resource failed recently and should be skipped.
+
+    Args:
+        cache: Failure timestamps keyed by resource identifier.
+        key: Resource identifier.
+
+    Returns:
+        True while the negative cache entry is still fresh.
+    """
+    stamp = cache.get(key)
+    return stamp is not None and time.monotonic() - stamp < NEGATIVE_CACHE_TTL
 
 
 def _download_sync(url: str, timeout: int, *, max_bytes: int | None = None) -> bytes:
-    import urllib.request
+    """Download a URL synchronously.
 
+    Args:
+        url: Target URL.
+        timeout: Timeout in seconds.
+        max_bytes: Optional size limit.
+
+    Returns:
+        Downloaded bytes.
+
+    Raises:
+        ValueError: If the payload exceeds ``max_bytes``.
+    """
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
         data = response.read(max_bytes + 1 if max_bytes else -1)
@@ -601,7 +502,49 @@ def _download_sync(url: str, timeout: int, *, max_bytes: int | None = None) -> b
     return data
 
 
+def _detect_image_extension(data: bytes) -> str | None:
+    """Detect a Typst-supported image extension from the payload header.
+
+    Args:
+        data: Image bytes.
+
+    Returns:
+        File extension including the dot, or None when unsupported.
+    """
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return ".png"
+    if data.startswith(b"\xff\xd8\xff"):
+        return ".jpg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return ".gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return ".webp"
+    if b"<svg" in data[:512]:
+        return ".svg"
+    return None
+
+
+def _is_png(data: bytes) -> bool:
+    """Check whether the payload is a PNG image.
+
+    Args:
+        data: Downloaded bytes.
+
+    Returns:
+        True for PNG data.
+    """
+    return data.startswith(b"\x89PNG\r\n\x1a\n")
+
+
 def _resolve_chinese_font(font_dir: Path) -> Path | None:
+    """Resolve or download the CJK font used by the Typst template.
+
+    Args:
+        font_dir: Directory that caches downloaded fonts.
+
+    Returns:
+        Path to the font file, or None when unavailable.
+    """
     downloaded_font = font_dir / CHINESE_FONT_FILENAME
     if _is_valid_font(downloaded_font):
         return downloaded_font
@@ -626,63 +569,51 @@ def _resolve_chinese_font(font_dir: Path) -> Path | None:
             logger.warning("[BilibiliPosts] 下载中文字体失败：%s", exc)
             continue
 
-    logger.warning("[BilibiliPosts] 中文字体下载失败，将使用 Pillow 默认字体。")
+    logger.warning("[BilibiliPosts] 中文字体不可用，将回退到系统字体。")
     return None
 
 
 def _is_valid_font(path: Path) -> bool:
+    """Check whether a file starts with a known font signature.
+
+    Args:
+        path: Candidate font file.
+
+    Returns:
+        True for TTC/TTF/OTF payloads.
+    """
     if not path.exists() or not path.is_file():
         return False
     try:
-        ImageFont.truetype(str(path), size=16)
+        with path.open("rb") as font_file:
+            return font_file.read(4) in FONT_MAGIC
     except OSError:
         return False
-    return True
-
-
-def _load_font(size: int, font_path: Path | None) -> ImageFont.ImageFont:
-    if font_path is not None:
-        try:
-            return ImageFont.truetype(str(font_path), size=size)
-        except OSError:
-            logger.warning("[BilibiliPosts] 加载字体失败：%s", font_path)
-    return ImageFont.load_default()
-
-
-def _placeholder(size: tuple[int, int], *, rounded: int | None = None) -> Image.Image:
-    img = Image.new("RGBA", size, (238, 242, 248, 255))
-    draw = ImageDraw.Draw(img)
-    draw.text((size[0] // 2 - 18, size[1] // 2 - 12), "B", fill=BILI_PINK)
-    if rounded:
-        return _round_image(img, rounded)
-    return _circle_image(img)
-
-
-def _circle_image(img: Image.Image) -> Image.Image:
-    size = min(img.size)
-    img = ImageOps.fit(img, (size, size), method=Image.Resampling.LANCZOS)
-    mask = Image.new("L", (size, size), 0)
-    draw = ImageDraw.Draw(mask)
-    draw.ellipse((0, 0, size, size), fill=255)
-    img.putalpha(mask)
-    return img
-
-
-def _round_image(img: Image.Image, radius: int) -> Image.Image:
-    mask = Image.new("L", img.size, 0)
-    draw = ImageDraw.Draw(mask)
-    draw.rounded_rectangle((0, 0, img.size[0], img.size[1]), radius=radius, fill=255)
-    img.putalpha(mask)
-    return img
 
 
 def _format_time(timestamp: int | None) -> str:
+    """Format a publish timestamp for display.
+
+    Args:
+        timestamp: UNIX timestamp.
+
+    Returns:
+        Formatted time or "刚刚" when unknown.
+    """
     if not timestamp:
         return "刚刚"
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(timestamp))
 
 
 def _format_count(value: int | None) -> str:
+    """Format interaction counters with Chinese units.
+
+    Args:
+        value: Raw counter value.
+
+    Returns:
+        Human-readable counter.
+    """
     if value is None or value < 0:
         return "0"
     if value < 10000:
@@ -692,18 +623,52 @@ def _format_count(value: int | None) -> str:
     return f"{value / 100000000:.1f}".rstrip("0").rstrip(".") + "亿"
 
 
-def _text_width(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.ImageFont) -> int:
-    if not text:
-        return 0
-    box = draw.textbbox((0, 0), text, font=font)
-    return box[2] - box[0]
+def _truncate_link(link: str, limit: int = 52) -> str:
+    """Shorten a link for the card footer.
+
+    Args:
+        link: Full URL.
+        limit: Maximum number of characters.
+
+    Returns:
+        Possibly truncated URL.
+    """
+    return link if len(link) <= limit else link[:limit].rstrip() + "…"
+
+
+def _safe_filename(value: str) -> str:
+    """Sanitize a dynamic id for use in a file name.
+
+    Args:
+        value: Raw identifier.
+
+    Returns:
+        Identifier containing only safe characters.
+    """
+    return "".join(char for char in value if char.isalnum() or char in "-_") or "card"
 
 
 def _normalize_text(text: str) -> str:
+    """Collapse all whitespace in a string.
+
+    Args:
+        text: Source text.
+
+    Returns:
+        Whitespace-free text.
+    """
     return "".join((text or "").split()).strip()
 
 
 def _split_text_tokens(text: str) -> list[tuple[str, bool]]:
+    """Split text into plain segments and emoji sequences.
+
+    Args:
+        text: Source text.
+
+    Returns:
+        Pairs of segment text and an ``is_emoji`` flag.
+    """
     if not text:
         return []
     tokens: list[tuple[str, bool]] = []
@@ -727,6 +692,15 @@ def _split_text_tokens(text: str) -> list[tuple[str, bool]]:
 
 
 def _consume_emoji(chars: list[str], index: int) -> tuple[str, int]:
+    """Consume one emoji sequence starting at an index.
+
+    Args:
+        chars: Character list.
+        index: Start index.
+
+    Returns:
+        The emoji sequence (empty when none) and the next index.
+    """
     char = chars[index]
     if index + 1 < len(chars) and _is_regional_indicator(char):
         next_char = chars[index + 1]
@@ -754,6 +728,15 @@ def _consume_emoji(chars: list[str], index: int) -> tuple[str, int]:
 
 
 def _consume_single_emoji(chars: list[str], index: int) -> int:
+    """Consume one emoji base with optional variation selector and skin tone.
+
+    Args:
+        chars: Character list.
+        index: Start index.
+
+    Returns:
+        Index right after the consumed emoji element.
+    """
     if index >= len(chars) or not _is_emoji_base(chars[index]):
         return index
     index += 1
@@ -765,6 +748,14 @@ def _consume_single_emoji(chars: list[str], index: int) -> int:
 
 
 def _twemoji_codepoint(emoji: str) -> str:
+    """Convert an emoji sequence to its twemoji file name.
+
+    Args:
+        emoji: Emoji character sequence.
+
+    Returns:
+        Hyphen-separated lowercase codepoints.
+    """
     codepoints = [ord(char) for char in emoji]
     normalized: list[int] = []
     for index, codepoint in enumerate(codepoints):
@@ -775,6 +766,15 @@ def _twemoji_codepoint(emoji: str) -> str:
 
 
 def _should_drop_variation_selector(codepoints: list[int], index: int) -> bool:
+    """Decide whether a variation selector is omitted from the twemoji name.
+
+    Args:
+        codepoints: Codepoint list.
+        index: Index of the variation selector.
+
+    Returns:
+        True when the selector should be dropped.
+    """
     prev_codepoint = codepoints[index - 1] if index > 0 else None
     next_codepoint = codepoints[index + 1] if index + 1 < len(codepoints) else None
     return (
@@ -784,24 +784,15 @@ def _should_drop_variation_selector(codepoints: list[int], index: int) -> bool:
     )
 
 
-def _emoji_size(font: ImageFont.ImageFont) -> int:
-    try:
-        box = font.getbbox("国")
-    except AttributeError:
-        return 24
-    return max(18, box[3] - box[1] + 4)
-
-
-def _emoji_y_offset(font: ImageFont.ImageFont, emoji_size: int) -> int:
-    try:
-        box = font.getbbox("国")
-    except AttributeError:
-        return 0
-    text_height = box[3] - box[1]
-    return max(0, (text_height - emoji_size) // 2 + 2)
-
-
 def _is_emoji_base(char: str) -> bool:
+    """Check whether a character can start an emoji sequence.
+
+    Args:
+        char: Single character.
+
+    Returns:
+        True for emoji base characters.
+    """
     code = ord(char)
     return (
         0x1F000 <= code <= 0x1FAFF
@@ -811,19 +802,51 @@ def _is_emoji_base(char: str) -> bool:
 
 
 def _is_regional_indicator(char: str) -> bool:
+    """Check whether a character is a regional indicator.
+
+    Args:
+        char: Single character.
+
+    Returns:
+        True for regional indicators.
+    """
     code = ord(char)
     return 0x1F1E6 <= code <= 0x1F1FF
 
 
 def _is_keycap_base(char: str) -> bool:
+    """Check whether a character can start a keycap emoji.
+
+    Args:
+        char: Single character.
+
+    Returns:
+        True for ``#``, ``*`` and digits.
+    """
     code = ord(char)
     return code in {0x0023, 0x002A} or _is_digit_codepoint(code)
 
 
 def _is_digit_codepoint(codepoint: int | None) -> bool:
+    """Check whether a codepoint is an ASCII digit.
+
+    Args:
+        codepoint: Codepoint or None.
+
+    Returns:
+        True for ASCII digits.
+    """
     return codepoint is not None and 0x0030 <= codepoint <= 0x0039
 
 
 def _is_skin_tone(char: str) -> bool:
+    """Check whether a character is an emoji skin tone modifier.
+
+    Args:
+        char: Single character.
+
+    Returns:
+        True for skin tone modifiers.
+    """
     code = ord(char)
     return 0x1F3FB <= code <= 0x1F3FF
