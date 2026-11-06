@@ -121,6 +121,8 @@ AstrBot 插件：定时检测指定 B站用户动态，并将新动态以 Typst 
 
 Emoji 不再依赖系统 emoji 字体。插件会使用 Twemoji PNG 图片按需渲染，单个 emoji 图片限制为 512KB，并缓存到 `cache/emoji/` 供后续动态复用。若单个 emoji 下载失败，会自动降级为普通文字渲染或忽略无法渲染的字符。
 
+点赞、评论、转发三个固定图标使用插件自带的 SVG（`core/icons/`，取自 [Lucide](https://lucide.dev)，ISC 许可，见 `core/icons/LICENSE`），启动时复制到 `cache/icons/` 供 Typst 读取，不依赖网络、不受 emoji 字体影响，尺寸与基线保持一致。
+
 模板文件为 `core/card.typ`，媒体素材以相对路径挂载在插件数据目录下（Typst 的 root），输出 PNG 仍写入 `data/temp/astrbot_plugin_bilibili_posts/`。渲染在后台线程中串行执行，不会阻塞事件循环。
 
 ## 注意事项
@@ -128,3 +130,12 @@ Emoji 不再依赖系统 emoji 字体。插件会使用 Twemoji PNG 图片按需
 - 建议将 `check_interval_minutes` 设置为 `30` 分钟或更高，避免频繁请求触发 B站风控。
 - `session_umos` 必须填写有效目标会话，否则模板会被跳过。
 - B站接口可能随时变化，若出现长期抓取失败，请先检查依赖版本和插件日志。
+
+## 开源协议
+
+本项目采用 [GNU Affero General Public License v3.0](LICENSE)（AGPL-3.0）协议开源，完整条款见 [LICENSE](LICENSE)。
+
+第三方资源：
+
+- `core/icons/` 下的点赞、评论、转发图标来自 [Lucide](https://lucide.dev)，采用 ISC 许可，声明见 [core/icons/LICENSE](core/icons/LICENSE)。
+- 运行时下载的 Twemoji 图片版权归 Twitter/X 及贡献者所有，按 CC-BY 4.0 使用。

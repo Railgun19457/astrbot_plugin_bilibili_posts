@@ -42,6 +42,7 @@ FORWARD_SUMMARY_MAX_LINES = 2
 MEDIA_CACHE_DIR_NAME = "media"
 FONT_CACHE_DIR_NAME = "fonts"
 EMOJI_CACHE_DIR_NAME = "emoji"
+ICONS_DIR_NAME = "icons"
 FONT_DOWNLOAD_TIMEOUT = 30
 FONT_DOWNLOAD_MAX_BYTES = 10 * 1024 * 1024
 EMOJI_DOWNLOAD_TIMEOUT = 10
@@ -84,6 +85,7 @@ class DynamicRenderer:
         self.media_dir = self.cache_dir / MEDIA_CACHE_DIR_NAME
         self.font_dir = self.cache_dir / FONT_CACHE_DIR_NAME
         self.emoji_dir = self.cache_dir / EMOJI_CACHE_DIR_NAME
+        self.icons_dir = self.cache_dir / ICONS_DIR_NAME
         self.timeout = timeout
         self.root = self.cache_dir.parent
         self.template = (Path(__file__).with_name("card.typ")).read_bytes()
@@ -94,9 +96,11 @@ class DynamicRenderer:
             self.media_dir,
             self.font_dir,
             self.emoji_dir,
+            self.icons_dir,
         ):
             directory.mkdir(parents=True, exist_ok=True)
 
+        self._install_icons()
         self.font_path = _resolve_chinese_font(self.font_dir)
         self._compiler: typst.Compiler | None = None
         self._lock = threading.Lock()
@@ -248,15 +252,21 @@ class DynamicRenderer:
 
         if has_stats:
             payload["stats"] = [
-                {"icon": self._rich("👍"), "value": _format_count(stats.like)},
-                {"icon": self._rich("💬"), "value": _format_count(stats.comment)},
-                {"icon": self._rich("↗"), "value": _format_count(stats.forward)},
+                {"icon": self._icon("like", "👍"), "value": _format_count(stats.like)},
+                {
+                    "icon": self._icon("comment", "💬"),
+                    "value": _format_count(stats.comment),
+                },
+                {
+                    "icon": self._icon("share", "↗"),
+                    "value": _format_count(stats.forward),
+                },
             ]
 
         return payload
 
     def _rich(self, text: str) -> list[dict]:
-        """Split text into plain text and twemoji image tokens.
+        """Split text into plain text and inline image tokens.
 
         Args:
             text: Raw text that may contain emoji.
@@ -269,7 +279,7 @@ class DynamicRenderer:
             if is_emoji:
                 path = self._emoji_path(segment)
                 if path:
-                    tokens.append({"emoji": path})
+                    tokens.append({"image": path})
                     continue
             tokens.append({"text": segment})
         return tokens
@@ -320,15 +330,36 @@ class DynamicRenderer:
             Root-relative POSIX path, or an empty string when unavailable.
         """
         codepoint = _twemoji_codepoint(emoji)
-        if not codepoint:
-            return ""
-        if _recently_failed(self._failed_emoji, codepoint):
+        if not codepoint or _recently_failed(self._failed_emoji, codepoint):
             return ""
         path = self.emoji_dir / f"{codepoint}.png"
         if not path.exists() and not self._download_twemoji(codepoint, path):
             self._failed_emoji[codepoint] = time.monotonic()
             return ""
         return self._relative(path)
+
+    def _icon(self, name: str, fallback: str) -> list[dict]:
+        """Build a stat icon token from a bundled SVG icon.
+
+        Args:
+            name: Icon file stem in ``core/icons`` (``like``/``comment``/``share``).
+            fallback: Text glyph used when the icon is unavailable.
+
+        Returns:
+            Token list consumed by the ``rich`` helper in ``card.typ``.
+        """
+        path = self.icons_dir / f"{name}.svg"
+        if path.exists():
+            return [{"image": self._relative(path)}]
+        return [{"text": fallback}]
+
+    def _install_icons(self) -> None:
+        """Copy bundled SVG icons into the Typst root so the template can use them."""
+        for svg in (Path(__file__).with_name("icons")).glob("*.svg"):
+            data = svg.read_bytes()
+            target = self.icons_dir / svg.name
+            if not target.exists() or target.read_bytes() != data:
+                target.write_bytes(data)
 
     def _download_twemoji(self, codepoint: str, cache_path: Path) -> bool:
         """Download a twemoji asset into the cache.

@@ -5,8 +5,10 @@
 - 概览图渲染改为纯 Typst 实现：新增 `core/card.typ` 模板，移除所有 Pillow 绘制代码与依赖。
 - 依赖变更：`Pillow` → `typst`（提供原生编译器，无需安装外部 `typst` CLI）。
 - 图片裁切、圆角、渐变背景、九宫格与胶囊布局交由 Typst 排版引擎处理，中文折行更自然。
+- 点赞、评论、转发图标改用插件自带的 Lucide SVG 图标（ISC 许可），尺寸与基线统一，不再依赖 Twemoji 下载。
 - 字体可用性校验改为检查字体文件头，字体不可用时回退到系统 CJK 字体。
 - 媒体素材按 Typst root 相对路径挂载，输出 PNG 仍写入 AstrBot 临时目录。
+- 添加 AGPL-3.0 开源许可证（`LICENSE`），并在 README 中说明 Lucide 图标的 ISC 许可。
 
 ## v0.1.1
 - 添加中文字体自动下载

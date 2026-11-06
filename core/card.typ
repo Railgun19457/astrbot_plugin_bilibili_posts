@@ -41,11 +41,11 @@
   },
 )
 
-// Render text tokens: plain text plus inline twemoji images.
-#let rich(tokens) = {
+// Render text tokens: plain text plus inline images (emoji and icons).
+#let rich(tokens, size: 1.05em) = {
   for token in tokens {
-    if "emoji" in token {
-      box(baseline: -0.15em, image(token.emoji, height: 1.05em))
+    if "image" in token {
+      box(baseline: -0.15em, image(token.image, height: size))
     } else {
       token.text
     }
@@ -62,7 +62,7 @@
     columns: (auto, auto),
     column-gutter: 7pt,
     align: horizon,
-    rich(s.icon),
+    rich(s.icon, size: 1.15em),
     text(size: 22pt, fill: secondary)[#s.value],
   ),
 )
